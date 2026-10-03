@@ -1,0 +1,10 @@
+[project]
+name = "churchsuite-mcp"
+version = "0.1.0"
+description = "Full-access MCP server for the ChurchSuite Core API v2, with per-request header credentials"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastmcp>=2.0,<3",
+    "httpx>=0.27",
+]
