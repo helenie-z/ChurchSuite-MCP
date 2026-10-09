@@ -11,18 +11,18 @@ ChurchSuite data.
 ## How authentication works
 
 The server stores **no ChurchSuite credentials**. Each MCP client sends its own API credentials
-as HTTP headers on every request:
+in the standard `Authorization` header on every request, in either form:
 
 | Header | Value |
 | --- | --- |
-| `X-ChurchSuite-Client-Id` | Your ChurchSuite API client ID |
-| `X-ChurchSuite-Client-Secret` | Your ChurchSuite API client secret |
+| `Authorization` | `Basic <base64 of client_id:client_secret>` |
+| `Authorization` | `Bearer <client_id>:<client_secret>` (for clients that only let you set a bearer token) |
 
 The server uses them to fetch an OAuth2 client-credentials token from ChurchSuite (cached in
 memory per credential pair and refreshed before expiry) and calls the API on that user's behalf.
 Several people can share one deployment, each with their own credentials.
 
-**Always deploy behind HTTPS**, since the secret travels in a request header. Never log request
+**Always deploy behind HTTPS**, since the secret travels in the `Authorization` header. Never log request
 headers in your proxy or platform.
 
 ## Modules and tools
@@ -100,14 +100,13 @@ and forwards `/mcp`.
 
 ## Connecting a client
 
-Your client must support **custom HTTP headers** on remote MCP servers.
+Your client must be able to send an `Authorization` header (or a bearer token) to a remote MCP server.
 
 **Claude Code**
 
 ```bash
 claude mcp add --transport http churchsuite https://YOUR-HOST/mcp \
-  --header "X-ChurchSuite-Client-Id: YOUR_CLIENT_ID" \
-  --header "X-ChurchSuite-Client-Secret: YOUR_CLIENT_SECRET"
+  --header "Authorization: Bearer YOUR_CLIENT_ID:YOUR_CLIENT_SECRET"
 ```
 
 **Generic JSON config** (clients that accept `url` + `headers`)
@@ -118,8 +117,7 @@ claude mcp add --transport http churchsuite https://YOUR-HOST/mcp \
     "churchsuite": {
       "url": "https://YOUR-HOST/mcp",
       "headers": {
-        "X-ChurchSuite-Client-Id": "YOUR_CLIENT_ID",
-        "X-ChurchSuite-Client-Secret": "YOUR_CLIENT_SECRET"
+        "Authorization": "Bearer YOUR_CLIENT_ID:YOUR_CLIENT_SECRET"
       }
     }
   }
@@ -133,14 +131,13 @@ tool is called)
 curl -s https://YOUR-HOST/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
-  -H "X-ChurchSuite-Client-Id: YOUR_CLIENT_ID" \
-  -H "X-ChurchSuite-Client-Secret: YOUR_CLIENT_SECRET" \
+  -u "YOUR_CLIENT_ID:YOUR_CLIENT_SECRET" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
 ```
 
 ## Security notes
 
-- Credentials are read per request and never written to disk or logged by this server.
+- Credentials are read per request from the `Authorization` header and never written to disk or logged by this server.
 - Only paths under the enabled modules (`/attendance/`, `/calendar/`, ...) can be called.
 - Anyone who can reach the URL **and** holds valid ChurchSuite credentials can act with those
   credentials. Consider putting the deployment behind an IP allow-list or an authenticating

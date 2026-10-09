@@ -7,10 +7,11 @@ Every GET, POST, PUT and DELETE endpoint in those modules is exposed as a tool, 
 
 Run:  python server.py        (serves streamable HTTP at http://HOST:PORT/mcp)
 
-Each MCP client sends its own ChurchSuite API credentials as HTTP headers on every request:
+Each MCP client sends its own ChurchSuite API credentials in the standard HTTP
+Authorization header on every request, in either form:
 
-      X-ChurchSuite-Client-Id:      <your ChurchSuite API client ID>
-      X-ChurchSuite-Client-Secret:  <your ChurchSuite API client secret>
+      Authorization: Basic base64(<client ID>:<client secret>)
+      Authorization: Bearer <client ID>:<client secret>
 
 Server config (env, none of it secret):
       CHURCHSUITE_MODULES        comma-separated subset to enable (default: all eight)
@@ -21,9 +22,10 @@ Server config (env, none of it secret):
       CHURCHSUITE_TOKEN_URL      (default https://login.churchsuite.com/oauth2/token)
       HOST / PORT                bind address for HTTP mode (default 0.0.0.0 / 8000)
 
-Always serve this over HTTPS: the secret travels in a request header.
+Always serve this over HTTPS: the secret travels in the Authorization header.
 """
 
+import base64
 import hashlib
 import os
 import time
@@ -97,19 +99,30 @@ def tool(module: str, method: str):
     return deco
 
 
-CLIENT_ID_HEADER = "x-churchsuite-client-id"
-CLIENT_SECRET_HEADER = "x-churchsuite-client-secret"
-
-
 def _credentials() -> tuple[str, str]:
-    """Read the caller's ChurchSuite credentials from the incoming HTTP request headers."""
+    """Read the caller's ChurchSuite credentials from the standard Authorization header.
+
+    Accepts `Basic base64(id:secret)` or `Bearer id:secret`.
+    """
     headers = get_http_headers(include_all=True)
-    cid = (headers.get(CLIENT_ID_HEADER) or "").strip()
-    secret = (headers.get(CLIENT_SECRET_HEADER) or "").strip()
-    if not cid or not secret:
+    value = (headers.get("authorization") or "").strip()
+    scheme, _, payload = value.partition(" ")
+    payload = payload.strip()
+    pair = ""
+    if scheme.lower() == "basic" and payload:
+        try:
+            pair = base64.b64decode(payload).decode()
+        except Exception:
+            pair = ""
+    elif scheme.lower() == "bearer":
+        pair = payload
+    cid, sep, secret = pair.partition(":")
+    cid, secret = cid.strip(), secret.strip()
+    if not sep or not cid or not secret:
         raise RuntimeError(
-            "Missing credentials. Send the HTTP headers "
-            "X-ChurchSuite-Client-Id and X-ChurchSuite-Client-Secret with every request."
+            "Missing or malformed credentials. Send an Authorization header of the form "
+            "'Basic base64(client_id:client_secret)' or 'Bearer client_id:client_secret' "
+            "with every request."
         )
     return cid, secret
 
