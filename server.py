@@ -7,34 +7,55 @@ Every GET, POST, PUT and DELETE endpoint in those modules is exposed as a tool, 
 
 Run:  python server.py        (serves streamable HTTP at http://HOST:PORT/mcp)
 
-Each MCP client sends its own ChurchSuite API credentials in the standard HTTP
-Authorization header on every request, in either form:
+Authentication: every person signs in with their OWN ChurchSuite login (OAuth 2.0
+authorization-code flow). The server acts as an OAuth proxy between Claude and ChurchSuite:
+Claude sends the person to ChurchSuite's login page, ChurchSuite sends them back to this
+server, and every API call is then made with that person's token. ChurchSuite therefore
+applies their own permissions, and changes show under their own name.
 
-      Authorization: Basic base64(<client ID>:<client secret>)
-      Authorization: Bearer <client ID>:<client secret>
+Setup:
+  1. In ChurchSuite, register an OAuth app (authorization-code / "web" app). Set its redirect
+     URI to  <PUBLIC_BASE_URL>/auth/callback  and note the client ID and secret.
+  2. Set the environment variables below and run the server behind HTTPS.
+  3. Add the connector in Claude using  <PUBLIC_BASE_URL>/mcp . Each person who connects it
+     is asked to sign in to ChurchSuite.
 
-Server config (env, none of it secret):
+Server config (env):
+      PUBLIC_BASE_URL            REQUIRED. The public https address of this server, e.g.
+                                 https://churchsuite-mcp.example.org (no trailing /mcp)
+      CHURCHSUITE_CLIENT_ID      REQUIRED. OAuth app client ID (from ChurchSuite)
+      CHURCHSUITE_CLIENT_SECRET  REQUIRED. OAuth app client secret (keep secret)
+      JWT_SIGNING_KEY            optional. Key for the tokens this server issues to Claude.
+                                 Defaults to one derived from the client secret.
+      FASTMCP_HOME               optional. Where encrypted login sessions are stored. Put this on
+                                 persistent disk, or everyone must sign in again after a redeploy.
+      CHURCHSUITE_TOKEN_AUTH_METHOD  optional. "client_secret_basic" (default) or
+                                 "client_secret_post", if ChurchSuite rejects the default.
       CHURCHSUITE_MODULES        comma-separated subset to enable (default: all eight)
       CHURCHSUITE_READ_ONLY      "true" hides every POST/PUT/DELETE tool and requests only
                                  the .read scopes (default: false)
       CHURCHSUITE_SCOPE          override the requested scopes
+      CHURCHSUITE_TIMEZONE       account timezone for calendar times (default Pacific/Auckland)
       CHURCHSUITE_API_BASE       (default https://api.churchsuite.com/v2)
+      CHURCHSUITE_AUTHORIZE_URL  (default https://login.churchsuite.com/oauth2/authorize)
       CHURCHSUITE_TOKEN_URL      (default https://login.churchsuite.com/oauth2/token)
       HOST / PORT                bind address for HTTP mode (default 0.0.0.0 / 8000)
 
 Always serve this over HTTPS: the secret travels in the Authorization header.
 """
 
-import base64
 import hashlib
 import os
 import time
+from datetime import datetime
 from typing import Annotated, Any, Literal
 
 import httpx
 from fastmcp import FastMCP
-from fastmcp.server.dependencies import get_http_headers
+from fastmcp.server.auth import AccessToken, OAuthProxy, TokenVerifier
+from fastmcp.server.dependencies import get_access_token
 from pydantic import Field
+from zoneinfo import ZoneInfo
 
 ALL_MODULES = [
     "attendance", "addressbook", "calendar", "children",
@@ -50,6 +71,11 @@ if _unknown:
 READ_ONLY = os.environ.get("CHURCHSUITE_READ_ONLY", "").strip().lower() in ("1", "true", "yes")
 API_BASE = os.environ.get("CHURCHSUITE_API_BASE", "https://api.churchsuite.com/v2").rstrip("/")
 TOKEN_URL = os.environ.get("CHURCHSUITE_TOKEN_URL", "https://login.churchsuite.com/oauth2/token")
+AUTHORIZE_URL = os.environ.get("CHURCHSUITE_AUTHORIZE_URL", "https://login.churchsuite.com/oauth2/authorize")
+# ChurchSuite reads the clock time of calendar event starts_at/ends_at as the ACCOUNT'S local time and
+# ignores any "Z" or offset, but returns true UTC. Tested 19-Oct-2026: sending 2026-10-20T10:00:00Z gave
+# an event at 10:00 NZ time (returned as 2026-10-19T21:00:00Z). Set this to the account's timezone.
+ACCOUNT_TZ = ZoneInfo(os.environ.get("CHURCHSUITE_TIMEZONE", "Pacific/Auckland"))
 
 
 def _default_scope() -> str:
@@ -62,12 +88,79 @@ def _default_scope() -> str:
 
 
 SCOPE = os.environ.get("CHURCHSUITE_SCOPE") or _default_scope()
+if "user" not in SCOPE.split():
+    SCOPE += " user"  # needed to check who is signed in (GET /account/users/current)
+
+
+def _required_env(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise SystemExit(f"{name} must be set. See the setup notes at the top of server.py.")
+    return value
+
+
+class ChurchSuiteTokenVerifier(TokenVerifier):
+    """Checks a person's ChurchSuite token by asking ChurchSuite who it belongs to.
+
+    Results are cached briefly so we do not call ChurchSuite on every request.
+    """
+
+    CACHE_SECONDS = 300
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._cache: dict[str, tuple[AccessToken, float]] = {}
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        key = hashlib.sha256(token.encode()).hexdigest()
+        now = time.time()
+        cached = self._cache.get(key)
+        if cached and cached[1] > now:
+            return cached[0]
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.get(
+                    f"{API_BASE}/account/users/current",
+                    headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                )
+        except httpx.HTTPError:
+            return None
+        if r.status_code != 200:
+            self._cache.pop(key, None)
+            return None
+        user = r.json().get("data", {})
+        access = AccessToken(
+            token=token,
+            client_id=str(user.get("username") or user.get("id") or "churchsuite-user"),
+            scopes=SCOPE.split(),
+            subject=str(user.get("id")) if user.get("id") is not None else None,
+            claims={"username": user.get("username"), "name": user.get("name"), "email": user.get("email")},
+        )
+        for k in [k for k, (_, exp) in self._cache.items() if exp <= now]:
+            del self._cache[k]
+        self._cache[key] = (access, now + self.CACHE_SECONDS)
+        return access
+
+
+auth = OAuthProxy(
+    upstream_authorization_endpoint=AUTHORIZE_URL,
+    upstream_token_endpoint=TOKEN_URL,
+    upstream_client_id=_required_env("CHURCHSUITE_CLIENT_ID"),
+    upstream_client_secret=_required_env("CHURCHSUITE_CLIENT_SECRET"),
+    token_verifier=ChurchSuiteTokenVerifier(),
+    base_url=_required_env("PUBLIC_BASE_URL").rstrip("/"),
+    valid_scopes=SCOPE.split(),
+    extra_authorize_params={"scope": SCOPE},  # always ask ChurchSuite for exactly these scopes
+    jwt_signing_key=os.environ.get("JWT_SIGNING_KEY") or None,
+    token_endpoint_auth_method=os.environ.get("CHURCHSUITE_TOKEN_AUTH_METHOD") or None,
+)
 ALLOWED_PREFIXES = tuple(f"/{m}/" for m in ENABLED)
 
 mcp = FastMCP(
     "churchsuite",
+    auth=auth,
     instructions=(
-        f"ChurchSuite access. Enabled modules: {', '.join(ENABLED)}. "
+        f"ChurchSuite access, acting as the signed-in person with their own ChurchSuite permissions. Enabled modules: {', '.join(ENABLED)}. "
         + ("READ-ONLY mode: no create/edit/delete tools exist. " if READ_ONLY else
            "Create/edit/delete tools change real data: confirm with the user before using them, "
            "and never delete or overwrite anything the user did not explicitly ask for. ")
@@ -101,60 +194,12 @@ def tool(module: str, method: str):
     return deco
 
 
-def _credentials() -> tuple[str, str]:
-    """Read the caller's ChurchSuite credentials from the standard Authorization header.
-
-    Accepts `Basic base64(id:secret)` or `Bearer id:secret`.
-    """
-    headers = get_http_headers(include_all=True)
-    value = (headers.get("authorization") or "").strip()
-    scheme, _, payload = value.partition(" ")
-    payload = payload.strip()
-    pair = ""
-    if scheme.lower() == "basic" and payload:
-        try:
-            pair = base64.b64decode(payload).decode()
-        except Exception:
-            pair = ""
-    elif scheme.lower() == "bearer":
-        pair = payload
-    cid, sep, secret = pair.partition(":")
-    cid, secret = cid.strip(), secret.strip()
-    if not sep or not cid or not secret:
-        raise RuntimeError(
-            "Missing or malformed credentials. Send an Authorization header of the form "
-            "'Basic base64(client_id:client_secret)' or 'Bearer client_id:client_secret' "
-            "with every request."
-        )
-    return cid, secret
-
-
-# One cached token per credential pair, keyed by a hash so the secret is never used as a dict key.
-_tokens: dict[str, tuple[str, float]] = {}
-
-
-async def _auth_header(client: httpx.AsyncClient) -> dict[str, str]:
-    """OAuth2 client-credentials token for the calling user, cached in memory and refreshed early."""
-    cid, secret = _credentials()
-    key = hashlib.sha256(f"{cid}\0{secret}".encode()).hexdigest()
-    now = time.time()
-    for k in [k for k, (_, exp) in _tokens.items() if exp <= now]:  # drop expired entries
-        del _tokens[k]
-    cached = _tokens.get(key)
-    if cached and now < cached[1] - 60:
-        token = cached[0]
-    else:
-        r = await client.post(
-            TOKEN_URL,
-            data={"grant_type": "client_credentials", "scope": SCOPE},
-            auth=(cid, secret),
-        )
-        if r.status_code >= 400:
-            raise RuntimeError(f"Token request failed {r.status_code}: {r.text[:300]}")
-        body = r.json()
-        token = body["access_token"]
-        _tokens[key] = (token, now + int(body.get("expires_in", 3600)))
-    return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+def _auth_header() -> dict[str, str]:
+    """Headers for a ChurchSuite API call, using the signed-in person's own token."""
+    access = get_access_token()
+    if access is None or not access.token:
+        raise RuntimeError("Not signed in to ChurchSuite. Reconnect the connector and sign in again.")
+    return {"Authorization": f"Bearer {access.token}", "Accept": "application/json"}
 
 
 async def _request(
@@ -171,7 +216,7 @@ async def _request(
         raise ValueError(f"Path not allowed: {path}")
     clean = {k: v for k, v in (params or {}).items() if v is not None}
     async with httpx.AsyncClient(timeout=30) as client:
-        headers = await _auth_header(client)
+        headers = _auth_header()
         r = await client.request(
             method, f"{API_BASE}{path}", params=clean, headers=headers,
             **({"json": body} if body is not None else {}),
@@ -190,6 +235,26 @@ def _plain(v: Any) -> Any:
     if isinstance(v, dict):
         return {k: _plain(x) for k, x in v.items()}
     return v
+
+
+def _to_account_local(value: str | None) -> str | None:
+    """Convert a date-time to the form ChurchSuite's calendar expects: the account's LOCAL clock time.
+
+    - With a Z or offset (e.g. 2026-11-01T10:00:00Z, or a value read back from the API): converted to
+      account-local time.
+    - With no offset (e.g. 2026-11-01T19:30:00): taken as already account-local.
+    The result is sent with a trailing Z, the format ChurchSuite accepts, but the clock time is local.
+    """
+    if value is None:
+        return None
+    v = value.strip()
+    try:
+        dt = datetime.fromisoformat(v.replace("Z", "+00:00") if v.endswith("Z") else v)
+    except ValueError:
+        raise ValueError(f"Not a valid ISO 8601 date-time: {value!r} (e.g. 2026-11-01T19:30:00)")
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(ACCOUNT_TZ).replace(tzinfo=None)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _body(
@@ -908,21 +973,21 @@ async def calendar_create_category(
 @tool("calendar", "POST")
 async def calendar_create_event(
     name: Annotated[str, Field(description="Name (name) - REQUIRED. The Event's name. (max 50 characters; cannot be empty)")],
-    starts_at: Annotated[str, Field(description="Starts at (starts_at) - REQUIRED. Date and time the Event starts. (ISO 8601 date-time; a trailing Z means UTC, e.g. 2026-11-01T10:00:00Z)")],
-    ends_at: Annotated[str, Field(description="Ends at (ends_at) - REQUIRED. Date and time the Event ends. (ISO 8601 date-time; a trailing Z means UTC, e.g. 2026-11-01T10:00:00Z)")],
+    starts_at: Annotated[str, Field(description="Starts at (starts_at) - REQUIRED. Date and time the Event starts. (ISO 8601 date-time. Give NZ local time with no Z or offset, e.g. 2026-11-01T19:30:00 for 7:30pm; a value with Z or an offset is converted to the account's local time first)")],
+    ends_at: Annotated[str, Field(description="Ends at (ends_at) - REQUIRED. Date and time the Event ends. (ISO 8601 date-time. Give NZ local time with no Z or offset, e.g. 2026-11-01T19:30:00 for 7:30pm; a value with Z or an offset is converted to the account's local time first)")],
     status: Annotated[Literal["confirmed", "cancelled", "pending"], Field(description="Status (status) - REQUIRED. The current status of the Event. (one of: confirmed, cancelled, pending)")],
     category_id: Annotated[int, Field(description="Category ID (category_id) - REQUIRED. The Event's category ID. HOW TO GET IT: Run calendar_list_categories and use the `id` of the category (match on `name`).")],
     sequence_id: Annotated[int | None, Field(description="Sequence ID (sequence_id) - Optional. If the Event is part of a sequence, this field should contain the sequence ID from an existing Event in the sequence. HOW TO GET IT: Only for repeating events: copy `sequence_id` from another event in the same series (calendar_get_event or calendar_list_events). Leave out for a one-off event.")] = None,
     description: Annotated[str | None, Field(description="Description (description) - Optional. The description of the Event. (cannot be empty)")] = None,
-    all_sites: Annotated[bool | None, Field(description="All sites (all_sites) - Optional. Whether the Event belongs to All Sites. Only true is accepted. Pass this OR site_ids - never both.")] = None,
+    all_sites: Annotated[bool | None, Field(description="All sites (all_sites) - Optional. Whether the Event belongs to All Sites. Only true is accepted. Note: on Trinity's account this is saved as site_ids [1] (the only site), not all_sites=true. Pass this OR site_ids - never both.")] = None,
     site_ids: Annotated[list[int] | None, Field(description="Site IDs (site_ids) - Optional. List of all site IDs the Event belongs to. HOW TO GET IT: No list tool for sites. Copy `site_ids` from an existing record (e.g. calendar_get_event), or use all_sites=true for every site. Pass this OR all_sites - never both.")] = None,
 ) -> Any:
     """Create an event. Create an event with the provided settings.
     
     WHAT YOU NEED TO PROVIDE
       - name (required): The Event's name (max 50 characters; cannot be empty)
-      - starts_at (required): Date and time the Event starts (ISO 8601 date-time; a trailing Z means UTC, e.g. 2026-11-01T10:00:00Z)
-      - ends_at (required): Date and time the Event ends (ISO 8601 date-time; a trailing Z means UTC, e.g. 2026-11-01T10:00:00Z)
+      - starts_at (required): Date and time the Event starts (ISO 8601 date-time. Give NZ local time with no Z or offset, e.g. 2026-11-01T19:30:00 for 7:30pm; a value with Z or an offset is converted to the account's local time first)
+      - ends_at (required): Date and time the Event ends (ISO 8601 date-time. Give NZ local time with no Z or offset, e.g. 2026-11-01T19:30:00 for 7:30pm; a value with Z or an offset is converted to the account's local time first)
       - status (required): The current status of the Event (one of: confirmed, cancelled, pending)
       - category_id (required): The Event's category ID -> Run calendar_list_categories and use the `id` of the category (match on `name`).
       - sequence_id (optional): If the Event is part of a sequence, this field should contain the sequence ID from an existing Event in the sequence -> Only for repeating events: copy `sequence_id` from another event in the same series (calendar_get_event or calendar_list_events). Leave out for a one-off event.
@@ -931,7 +996,13 @@ async def calendar_create_event(
       - site_ids (optional): List of all site IDs the Event belongs to -> No list tool for sites. Copy `site_ids` from an existing record (e.g. calendar_get_event), or use all_sites=true for every site.
       Site rule: pass exactly one of: all_sites OR site_ids.
     
-    VISIBILITY: the ChurchSuite API (v2.112.3) does not accept a `visibility` object on create or edit - it is read-only (you can see it with calendar_get_event). New events get the Calendar module's default visibility; change website/Embed, featured and My ChurchSuite audience inside ChurchSuite. Do not pass `visibility`."""
+    TIMES: ChurchSuite reads starts_at/ends_at as the account's local (NZ) time. Pass local time with no Z, e.g. 2026-11-01T19:30:00. Values come back from ChurchSuite in true UTC, so 19:30 NZ shows as 06:30Z. Always check the returned event.
+
+    NOT SETTABLE VIA THE API (v2.112.3), set these inside ChurchSuite afterwards:
+      - visibility (My ChurchSuite, website/Embed, Connect, featured): read-only. New events get the Calendar module's default, which on Trinity's account is hidden everywhere.
+      - location, image, sign-up options and confirmation email.
+    REPEATING EVENTS: this cannot start a new series. sequence_id only adds an event to a series that already exists; otherwise create one event per date."""
+    starts_at, ends_at = _to_account_local(starts_at), _to_account_local(ends_at)
     body = _body({"sequence_id": sequence_id, "name": name, "starts_at": starts_at, "ends_at": ends_at, "status": status, "description": description, "category_id": category_id, "all_sites": all_sites, "site_ids": site_ids}, None, (), keep=())
     if all_sites is not None and all_sites is not True:
         raise ValueError("all_sites can only be true. To limit the item to certain sites pass site_ids instead.")
@@ -998,12 +1069,12 @@ async def calendar_edit_event(
     id: Annotated[int, Field(description="ID (id) - REQUIRED. ID of the event to change. Find it with calendar_list_events (use `q` to search) or the matching get tool.")],
     sequence_id: Annotated[int | None, Field(description="Sequence ID (sequence_id) - Optional - leave out to keep the current value. If the Event is part of a sequence, this field should contain the sequence ID from an existing Event in the sequence. HOW TO GET IT: Only for repeating events: copy `sequence_id` from another event in the same series (calendar_get_event or calendar_list_events). Leave out for a one-off event.")] = None,
     name: Annotated[str | None, Field(description="Name (name) - Optional - leave out to keep the current value. The Event's name. (max 50 characters; cannot be empty)")] = None,
-    starts_at: Annotated[str | None, Field(description="Starts at (starts_at) - Optional - leave out to keep the current value. Date and time the Event starts. (ISO 8601 date-time; a trailing Z means UTC, e.g. 2026-11-01T10:00:00Z)")] = None,
-    ends_at: Annotated[str | None, Field(description="Ends at (ends_at) - Optional - leave out to keep the current value. Date and time the Event ends. (ISO 8601 date-time; a trailing Z means UTC, e.g. 2026-11-01T10:00:00Z)")] = None,
+    starts_at: Annotated[str | None, Field(description="Starts at (starts_at) - Optional - leave out to keep the current value. Date and time the Event starts. (ISO 8601 date-time. Give NZ local time with no Z or offset, e.g. 2026-11-01T19:30:00 for 7:30pm; a value with Z or an offset is converted to the account's local time first)")] = None,
+    ends_at: Annotated[str | None, Field(description="Ends at (ends_at) - Optional - leave out to keep the current value. Date and time the Event ends. (ISO 8601 date-time. Give NZ local time with no Z or offset, e.g. 2026-11-01T19:30:00 for 7:30pm; a value with Z or an offset is converted to the account's local time first)")] = None,
     status: Annotated[Literal["confirmed", "cancelled", "pending"] | None, Field(description="Status (status) - Optional - leave out to keep the current value. The current status of the Event. (one of: confirmed, cancelled, pending)")] = None,
     description: Annotated[str | None, Field(description="Description (description) - Optional - leave out to keep the current value. The description of the Event.")] = None,
     category_id: Annotated[int | None, Field(description="Category ID (category_id) - Optional - leave out to keep the current value. The Event's category ID. HOW TO GET IT: Run calendar_list_categories and use the `id` of the category (match on `name`).")] = None,
-    all_sites: Annotated[bool | None, Field(description="All sites (all_sites) - Optional - leave out to keep the current value. Whether the Event belongs to All Sites. Only true is accepted. Pass this OR site_ids - never both.")] = None,
+    all_sites: Annotated[bool | None, Field(description="All sites (all_sites) - Optional - leave out to keep the current value. Whether the Event belongs to All Sites. Only true is accepted. Note: on Trinity's account this is saved as site_ids [1] (the only site), not all_sites=true. Pass this OR site_ids - never both.")] = None,
     site_ids: Annotated[list[int] | None, Field(description="Site IDs (site_ids) - Optional - leave out to keep the current value. List of all site IDs the Event belongs to. HOW TO GET IT: No list tool for sites. Copy `site_ids` from an existing record (e.g. calendar_get_event), or use all_sites=true for every site. Pass this OR all_sites - never both.")] = None,
     set_null: Annotated[list[Literal["sequence_id"]] | None, Field(description="Optional. Names of fields to CLEAR (set to null). Allowed: sequence_id. Leave a field out of both its own parameter and this list to keep it unchanged.")] = None,
     fill_from_current: Annotated[bool, Field(description="Default true. Read the event first and re-send its unchanged fields, so you only have to pass what you are changing. Set false to send exactly and only the fields you pass.")] = True,
@@ -1014,8 +1085,8 @@ async def calendar_edit_event(
       - id (required): ID of the event to change. Find it with calendar_list_events (use `q` to search) or the matching get tool.
       - sequence_id (optional): If the Event is part of a sequence, this field should contain the sequence ID from an existing Event in the sequence -> Only for repeating events: copy `sequence_id` from another event in the same series (calendar_get_event or calendar_list_events). Leave out for a one-off event.
       - name (optional): The Event's name (max 50 characters; cannot be empty)
-      - starts_at (optional): Date and time the Event starts (ISO 8601 date-time; a trailing Z means UTC, e.g. 2026-11-01T10:00:00Z)
-      - ends_at (optional): Date and time the Event ends (ISO 8601 date-time; a trailing Z means UTC, e.g. 2026-11-01T10:00:00Z)
+      - starts_at (optional): Date and time the Event starts (ISO 8601 date-time. Give NZ local time with no Z or offset, e.g. 2026-11-01T19:30:00 for 7:30pm; a value with Z or an offset is converted to the account's local time first)
+      - ends_at (optional): Date and time the Event ends (ISO 8601 date-time. Give NZ local time with no Z or offset, e.g. 2026-11-01T19:30:00 for 7:30pm; a value with Z or an offset is converted to the account's local time first)
       - status (optional): The current status of the Event (one of: confirmed, cancelled, pending)
       - description (optional): The description of the Event
       - category_id (optional): The Event's category ID -> Run calendar_list_categories and use the `id` of the category (match on `name`).
@@ -1025,7 +1096,10 @@ async def calendar_edit_event(
       - fill_from_current (optional): see parameter description.
       Site rule: pass exactly one of: all_sites OR site_ids.
     
-    VISIBILITY: the API cannot set `visibility` (embed, featured, My ChurchSuite groups); this tool never sends it, so existing visibility is left as it was. Check with calendar_get_event afterwards. By default (fill_from_current=true) the tool first reads the event and re-sends the unchanged name, dates, status, category, description, sequence_id and sites, because ChurchSuite validates a full event on every edit - so you only need to pass what you want to change."""
+    TIMES: pass NZ local time with no Z (e.g. 2026-11-01T19:30:00). When re-sending the current start/end (fill_from_current), the tool converts ChurchSuite's UTC values back to local time so the event does not move.
+
+    VISIBILITY: the API cannot set `visibility` (embed, featured, My ChurchSuite groups); this tool never sends it, so existing visibility is left as it was. Location, image and sign-up options cannot be changed via the API either. Check with calendar_get_event afterwards. By default (fill_from_current=true) the tool first reads the event and re-sends the unchanged name, dates, status, category, description, sequence_id and sites, because ChurchSuite validates a full event on every edit - so you only need to pass what you want to change."""
+    starts_at, ends_at = _to_account_local(starts_at), _to_account_local(ends_at)
     body = _body({"sequence_id": sequence_id, "name": name, "starts_at": starts_at, "ends_at": ends_at, "status": status, "description": description, "category_id": category_id, "all_sites": all_sites, "site_ids": site_ids}, set_null, ("sequence_id", ), keep=())
     if all_sites is not None and all_sites is not True:
         raise ValueError("all_sites can only be true. To limit the item to certain sites pass site_ids instead.")
@@ -1034,7 +1108,8 @@ async def calendar_edit_event(
         cur = (await _request("GET", f"/calendar/events/{id}")).get("data", {})
         for k in ("name", "starts_at", "ends_at", "status", "category_id", "description"):
             if k not in body and cur.get(k) is not None:
-                body[k] = cur[k]
+                # ChurchSuite returns true UTC but reads input as local time: convert or the event shifts.
+                body[k] = _to_account_local(cur[k]) if k in ("starts_at", "ends_at") else cur[k]
         if "sequence_id" not in body:
             body["sequence_id"] = cur.get("sequence_id")
         if "all_sites" not in body and "site_ids" not in body:
