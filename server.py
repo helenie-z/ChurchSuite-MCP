@@ -29,11 +29,12 @@ import base64
 import hashlib
 import os
 import time
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import httpx
 from fastmcp import FastMCP
 from fastmcp.server.dependencies import get_http_headers
+from pydantic import Field
 
 ALL_MODULES = [
     "attendance", "addressbook", "calendar", "children",
@@ -76,7 +77,8 @@ mcp = FastMCP(
         "set_null. Attendance: a Gathering has Metricsets containing Metrics; a Record is one "
         "Gathering on one date with Record Metrics (values) and, if people tracking is on, "
         "Record Contacts. Currency values are in the smallest unit (pence/cents). The children "
-        "module holds children's personal data: handle it with care."
+        "module holds children's personal data: handle it with care. Create/edit tools list, "
+        "per field, what to provide and where to find IDs (e.g. category_id: run calendar_list_categories)."
     ),
 )
 
@@ -181,6 +183,15 @@ async def _request(
         return r.json()
 
 
+def _plain(v: Any) -> Any:
+    """Plain JSON-able copy of a value (lists/dicts are copied recursively)."""
+    if isinstance(v, list):
+        return [_plain(x) for x in v]
+    if isinstance(v, dict):
+        return {k: _plain(x) for k, x in v.items()}
+    return v
+
+
 def _body(
     values: dict[str, Any],
     set_null: list[str] | None,
@@ -188,12 +199,27 @@ def _body(
     keep: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     # `keep` = required fields that may legitimately be null: always sent, even when None.
-    body = {k: v for k, v in values.items() if v is not None or k in keep}
+    body = {k: _plain(v) for k, v in values.items() if v is not None or k in keep}
     for k in set_null or []:
         if k not in nullable:
             raise ValueError(f"'{k}' cannot be set to null. Nullable fields: {', '.join(nullable) or 'none'}")
         body[k] = None
     return body
+
+
+def _check_choice(body: dict[str, Any], groups: list, need_one: bool) -> None:
+    """Enforce 'pass exactly one of these option groups' rules from the spec's oneOf blocks."""
+    names = " OR ".join(" + ".join(props) for props, _ in groups)
+    used = [(props, req) for props, req in groups if any(body.get(p) is not None for p in props)]
+    if len(used) > 1:
+        raise ValueError(f"Pass only one of: {names}")
+    if not used:
+        if need_one:
+            raise ValueError(f"Pass one of: {names}")
+        return
+    missing = [r for r in used[0][1] if body.get(r) is None]
+    if missing:
+        raise ValueError(f"Missing {', '.join(missing)} (needed with {' + '.join(used[0][0])})")
 
 
 # ======== attendance ========
@@ -409,171 +435,338 @@ async def addressbook_list_tags(page: int | None = None, per_page: int | None = 
     return await _request("GET", "/addressbook/tags", {"page": page, "per_page": per_page, "q": q, "order_by": order_by})
 
 @tool("addressbook", "POST")
-async def addressbook_create_contact(first_name: str, last_name: str, all_sites: bool, site_ids: list[int], middle_name: str | None = None, title: str | None = None, formal_name: str | None = None, former_name: str | None = None, email: str | None = None, mobile: str | None = None, telephone: str | None = None, address: dict[str, Any] | None = None, sex: Literal["female", "male"] | None = None, date_of_birth: str | None = None, marital_status: Literal["single", "married", "engaged", "partnered", "separated", "divorced", "widowed"] | None = None, spouse_id: int | None = None, job: str | None = None, employer: str | None = None, work_telephone: str | None = None, custom_fields: list[Any] | None = None, communication: dict[str, Any] | None = None, login: dict[str, Any] | None = None, privacy: dict[str, Any] | None = None) -> Any:
+async def addressbook_create_contact(
+    first_name: Annotated[str, Field(description="First name (first_name) - REQUIRED. The first name of the Contact. (max 50 characters; cannot be empty)")],
+    last_name: Annotated[str, Field(description="Last name (last_name) - REQUIRED. The last name of the Contact. (max 50 characters; cannot be empty)")],
+    all_sites: Annotated[bool, Field(description="All sites (all_sites) - REQUIRED. Whether the Contact belongs to All Sites.")],
+    site_ids: Annotated[list[int], Field(description="Site IDs (site_ids) - REQUIRED. An array of Site IDs that the Contact belongs to. If `all_sites` is `true`, this will be overridden. You are only able to add site IDs for sites you have the relevant permission for. HOW TO GET IT: No list tool for sites. Copy `site_ids` from an existing record (e.g. addressbook_get_contact), or use all_sites=true for every site.")],
+    middle_name: Annotated[str | None, Field(description="Middle name (middle_name) - Optional. The middle name of the Contact. (max 50 characters; cannot be empty)")] = None,
+    title: Annotated[str | None, Field(description="Title (title) - Optional. The title of the Contact. (max 25 characters; cannot be empty)")] = None,
+    formal_name: Annotated[str | None, Field(description="Formal name (formal_name) - Optional. The formal name of the Contact. (max 50 characters; cannot be empty)")] = None,
+    former_name: Annotated[str | None, Field(description="Former name (former_name) - Optional. Use this if a Contact has changed their last name and you want to record their previous last name. I.e. someone's maiden name. (max 50 characters; cannot be empty)")] = None,
+    email: Annotated[str | None, Field(description="Email (email) - Optional. The Contact's email address. (max 100 characters; an email address)")] = None,
+    mobile: Annotated[str | None, Field(description="Mobile (mobile) - Optional. The Contact's mobile number. (max 20 characters; cannot be empty)")] = None,
+    telephone: Annotated[str | None, Field(description="Telephone (telephone) - Optional. The Contact's telephone number. (max 20 characters; cannot be empty)")] = None,
+    address: Annotated[dict[str, Any] | None, Field(description="Address (address) - Optional. A street Address. Object keys: {line_1 (string): The first line of the Address; line_2 (string): The second line of the Address; line_3 (string): The third line of the Address; city (string): The city of the Address; county (string): The county of the Address; country (string): The country of the Address, in ISO3166 alpha 2 format; postcode (string): The postcode of the Address}")] = None,
+    sex: Annotated[Literal["female", "male"] | None, Field(description="Sex (sex) - Optional. The sex of the Contact. (one of: female, male)")] = None,
+    date_of_birth: Annotated[str | None, Field(description="Date of birth (date_of_birth) - Optional. The Contact's date of birth. (date as YYYY-MM-DD)")] = None,
+    marital_status: Annotated[Literal["single", "married", "engaged", "partnered", "separated", "divorced", "widowed"] | None, Field(description="Marital status (marital_status) - Optional. The Contact's marital status. (one of: single, married, engaged, partnered, separated, divorced, widowed)")] = None,
+    spouse_id: Annotated[int | None, Field(description="Spouse ID (spouse_id) - Optional. The Contact ID for the Contact's spouse. HOW TO GET IT: Run addressbook_list_contacts and use the spouse's contact `id`.")] = None,
+    job: Annotated[str | None, Field(description="Job (job) - Optional. The job of the Contact. (max 100 characters; cannot be empty)")] = None,
+    employer: Annotated[str | None, Field(description="Employer (employer) - Optional. The employer of the Contact. (max 100 characters; cannot be empty)")] = None,
+    work_telephone: Annotated[str | None, Field(description="Work telephone (work_telephone) - Optional. The Contact's work telephone number. (max 20 characters; cannot be empty)")] = None,
+    custom_fields: Annotated[list[dict[str, Any]] | None, Field(description="Custom fields (custom_fields) - Optional. Custom Field responses for this resource. HOW TO GET IT: Use addressbook_list_custom_fields to find each field's `id` and type. Object keys: list of ONE of these shapes: {id (integer, required): The ID of the Custom Field; field_type (one of text/textarea/phone/date, required): A discriminator to determine the type of Custom Field this response belongs to; value (string, required): The raw value of a text, textarea, phone or date} OR {id (integer, required): The ID of the Custom Field; field_type (one of email, required): A discriminator to determine the type of Custom Field this response belongs to; value (string, required): The raw value of an email} OR {id (integer, required): The ID of the Custom Field; field_type (one of radio/select, required): A discriminator to determine the type of Custom Field this response belongs to; value ({id (string, required)}, required): The UUID of the selected response for a radio or select field} OR {id (integer, required): The ID of the Custom Field; field_type (one of checkbox, required): A discriminator to determine the type of Custom Field this response belongs to; value (list of {id (string, required)}, required): A list of UUIDs of the selected responses for a checkbox field}")] = None,
+    communication: Annotated[dict[str, Any] | None, Field(description="Communication (communication) - Optional. The person's communication preferences. If no data is provided, the module default communication preferences will be used. Object keys: {general_email (boolean, required): Whether this person has consented to receiving general emails; general_sms (boolean, required): Whether this person has consented to receiving general SMS messages; phone (boolean, required): Whether this person has consented to receiving phone calls; post (boolean, required): Whether this person has consented to receiving post; rota_email (boolean, required): Whether this person has consented to receiving rota emails; rota_sms (boolean, required): Whether this person has consented to receiving rota SMS messages}")] = None,
+    login: Annotated[dict[str, Any] | None, Field(description="Login (login) - Optional. My ChurchSuite/CharitySuite login information. Object keys: {enabled (boolean, required): Whether the person is able to log into My; invited (boolean, required): Whether the person has been invited to create a My account}")] = None,
+    privacy: Annotated[dict[str, Any] | None, Field(description="Privacy (privacy) - Optional. Add the Contact's privacy settings. If no data is provided, the default privacy settings will be used. Object keys: {name_visible (boolean, required): Whether the Contact's name is visible in My; address_visible (boolean, required): Whether the Contact's address is visible in My. This will only be respected if name_visible is true, else it will not be visible; mobile_visible (boolean, required): Whether the Contact's mobile is visible in My. This will only be respected if name_visible is true, else it will not be visible; email_visible (boolean, required): Whether the Contact's email is visible in My. This will only be respected if name_visible is true, else it will not be visible; telephone_visible (boolean, required): Whether the Contact's mobile is visible in My. This will only be respected if name_visible is true, else it will not be visible}")] = None,
+) -> Any:
     """Create a contact. Create a contact with the provided settings.
-    first_name (required): The first name of the Contact.
-    last_name (required): The last name of the Contact.
-    all_sites (required): Whether the Contact belongs to All Sites.
-    site_ids (required): An array of Site IDs that the Contact belongs to. If `all_sites` is `true`, this will be overridden. You are only able to add site IDs for sites you have the relevant permission for.
-    middle_name: The middle name of the Contact.
-    title: The title of the Contact.
-    formal_name: The formal name of the Contact.
-    former_name: Use this if a Contact has changed their last name and you want to record their previous last name. I.e. someone's maiden name.
-    email: The Contact's email address.
-    mobile: The Contact's mobile number.
-    telephone: The Contact's telephone number.
-    address: A street Address. Object keys: line_1 (string): The first line of the Address; line_2 (string): The second line of the Address; line_3 (string): The third line of the Address; city (string): The city of the Address; county (string): The county of the Address; country (string): The country of the Address, in ISO3166 alpha 2 format; postcode (string): The postcode of the Address.
-    sex: The sex of the Contact.
-    date_of_birth: The Contact's date of birth.
-    marital_status: The Contact's marital status.
-    spouse_id: The Contact ID for the Contact's spouse.
-    job: The job of the Contact.
-    employer: The employer of the Contact.
-    work_telephone: The Contact's work telephone number.
-    custom_fields: Custom Field responses for this resource
-    communication: The person's communication preferences. If no data is provided, the module default communication preferences will be used. Object keys: general_email (boolean, required): Whether this person has consented to receiving general emails; general_sms (boolean, required): Whether this person has consented to receiving general SMS messages; phone (boolean, required): Whether this person has consented to receiving phone calls; post (boolean, required): Whether this person has consented to receiving post; rota_email (boolean, required): Whether this person has consented to receiving rota emails; rota_sms (boolean, required): Whether this person has consented to receiving rota SMS messages.
-    login: My ChurchSuite/CharitySuite login information. Keys: enabled, invited.
-    privacy: Add the Contact's privacy settings. If no data is provided, the default privacy settings will be used. Object keys: name_visible (boolean, required): Whether the Contact's name is visible in My; address_visible (boolean, required): Whether the Contact's address is visible in My. This will only be respected if name_visible is true, else it will not be visible; mobile_visible (boolean, required): Whether the Contact's mobile is visible in My. This will only be respected if name_visible is true, else it will not be visible; email_visible (boolean, required): Whether the Contact's email is visible in My. This will only be respected if name_visible is true, else it will not be visible; telephone_visible (boolean, required): Whether the Contact's mobile is visible in My. This will only be respected if name_visible is true, else it will not be visible."""
-    return await _request("POST", "/addressbook/contacts", None, _body({"first_name": first_name, "last_name": last_name, "all_sites": all_sites, "site_ids": site_ids, "middle_name": middle_name, "title": title, "formal_name": formal_name, "former_name": former_name, "email": email, "mobile": mobile, "telephone": telephone, "address": address, "sex": sex, "date_of_birth": date_of_birth, "marital_status": marital_status, "spouse_id": spouse_id, "job": job, "employer": employer, "work_telephone": work_telephone, "custom_fields": custom_fields, "communication": communication, "login": login, "privacy": privacy}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - first_name (required): The first name of the Contact (max 50 characters; cannot be empty)
+      - last_name (required): The last name of the Contact (max 50 characters; cannot be empty)
+      - all_sites (required): Whether the Contact belongs to All Sites
+      - site_ids (required): An array of Site IDs that the Contact belongs to. If `all_sites` is `true`, this will be overridden. You are only able to add site IDs for sites you have the relevant permission for -> No list tool for sites. Copy `site_ids` from an existing record (e.g. addressbook_get_contact), or use all_sites=true for every site.
+      - middle_name (optional): The middle name of the Contact (max 50 characters; cannot be empty)
+      - title (optional): The title of the Contact (max 25 characters; cannot be empty)
+      - formal_name (optional): The formal name of the Contact (max 50 characters; cannot be empty)
+      - former_name (optional): Use this if a Contact has changed their last name and you want to record their previous last name. I.e. someone's maiden name (max 50 characters; cannot be empty)
+      - email (optional): The Contact's email address (max 100 characters; an email address)
+      - mobile (optional): The Contact's mobile number (max 20 characters; cannot be empty)
+      - telephone (optional): The Contact's telephone number (max 20 characters; cannot be empty)
+      - address (optional): A street Address
+      - sex (optional): The sex of the Contact (one of: female, male)
+      - date_of_birth (optional): The Contact's date of birth (date as YYYY-MM-DD)
+      - marital_status (optional): The Contact's marital status (one of: single, married, engaged, partnered, separated, divorced, widowed)
+      - spouse_id (optional): The Contact ID for the Contact's spouse -> Run addressbook_list_contacts and use the spouse's contact `id`.
+      - job (optional): The job of the Contact (max 100 characters; cannot be empty)
+      - employer (optional): The employer of the Contact (max 100 characters; cannot be empty)
+      - work_telephone (optional): The Contact's work telephone number (max 20 characters; cannot be empty)
+      - custom_fields (optional): Custom Field responses for this resource -> Use addressbook_list_custom_fields to find each field's `id` and type.
+      - communication (optional): The person's communication preferences. If no data is provided, the module default communication preferences will be used
+      - login (optional): My ChurchSuite/CharitySuite login information
+      - privacy (optional): Add the Contact's privacy settings. If no data is provided, the default privacy settings will be used"""
+    body = _body({"first_name": first_name, "last_name": last_name, "middle_name": middle_name, "title": title, "formal_name": formal_name, "former_name": former_name, "email": email, "mobile": mobile, "telephone": telephone, "address": address, "sex": sex, "date_of_birth": date_of_birth, "marital_status": marital_status, "spouse_id": spouse_id, "job": job, "employer": employer, "work_telephone": work_telephone, "custom_fields": custom_fields, "communication": communication, "login": login, "privacy": privacy, "all_sites": all_sites, "site_ids": site_ids}, None, (), keep=())
+    return await _request("POST", "/addressbook/contacts", None, body)
 
 @tool("addressbook", "POST")
-async def addressbook_create_contact_note(id: int, content: str, pinned: bool | None = None, visible_to: Any | None = None) -> Any:
+async def addressbook_create_contact_note(
+    id: Annotated[int, Field(description="ID (id) - REQUIRED. ID of the contact to add the note to. Find it with addressbook_list_contacts (use `q` to search).")],
+    content: Annotated[str, Field(description="Content (content) - REQUIRED. The content of the Note. (max 65535 characters; cannot be empty)")],
+    pinned: Annotated[bool | None, Field(description="Pinned (pinned) - Optional. Whether the Note should be pinned.")] = None,
+    visible_to: Annotated[dict[str, Any] | None, Field(description="Visible to (visible_to) - Optional. Object keys: ONE of these shapes: {just_me (one of true): The resource should only be visible to the current user} OR {user_group_ids (list of integer): List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to -> ChurchSuite user-group IDs. No list tool; copy them from an existing record's visible_to, or ask a ChurchSuite admin.}")] = None,
+) -> Any:
     """Create a contact note. Create a Note against a Contact in the Address Book module.
-    content (required): The content of the Note.
-    pinned: Whether the Note should be pinned.
-    visible_to: Object, one of these shapes: {just_me: must be true} OR {user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to."""
-    return await _request("POST", f"/addressbook/contacts/{id}/notes", None, _body({"content": content, "pinned": pinned, "visible_to": visible_to}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - id (required): ID of the contact to add the note to. Find it with addressbook_list_contacts (use `q` to search).
+      - content (required): The content of the Note (max 65535 characters; cannot be empty)
+      - pinned (optional): Whether the Note should be pinned
+      - visible_to (optional): Visible to"""
+    body = _body({"content": content, "pinned": pinned, "visible_to": visible_to}, None, (), keep=())
+    return await _request("POST", f"/addressbook/contacts/{id}/notes", None, body)
 
 @tool("addressbook", "POST")
-async def addressbook_create_flow_stage(flow_id: int, name: str, due_interval: int, due_period: Literal["days", "weeks", "months"], due_from: Literal["first_added", "previous_stage"], instructions: str | None = None, assigned_user_id: int | None = None, automate_time: str | None = None) -> Any:
+async def addressbook_create_flow_stage(
+    flow_id: Annotated[int, Field(description="Flow ID (flow_id) - REQUIRED. The Flow ID the Stage belongs to. HOW TO GET IT: Run addressbook_list_flows and use the flow `id`.")],
+    name: Annotated[str, Field(description="Name (name) - REQUIRED. The Stage's name. (max 50 characters; cannot be empty)")],
+    due_interval: Annotated[int, Field(description="Due interval (due_interval) - REQUIRED. The number of days, weeks or months used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage.")],
+    due_period: Annotated[Literal["days", "weeks", "months"], Field(description="Due period (due_period) - REQUIRED. The due period used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage. (one of: days, weeks, months)")],
+    due_from: Annotated[Literal["first_added", "previous_stage"], Field(description="Due from (due_from) - REQUIRED. The relative point used for tracking a person linked to the Stage, either when they are first added to the flow or when they are processed from a previous stage. (one of: first_added, previous_stage)")],
+    instructions: Annotated[str | None, Field(description="Instructions (instructions) - Optional. The instructions for the Stage. (max 65535 characters)")] = None,
+    assigned_user_id: Annotated[int | None, Field(description="Assigned user ID (assigned_user_id) - Optional. The ID of the user automatically assigned to people in this stage, or null if no user is assigned. HOW TO GET IT: A ChurchSuite user ID. No list tool; it appears as `assigned_user_id` on existing flow stages/trackings.")] = None,
+    automate_time: Annotated[str | None, Field(description="Automate time (automate_time) - Optional. The UTC time the Stage will automatically process any due or overdue people if it is automated, or null if it is not automated.")] = None,
+) -> Any:
     """Create a flow stage. Create a stage for a flow.
-    flow_id (required): The Flow ID the Stage belongs to.
-    name (required): The Stage's name.
-    due_interval (required): The number of days, weeks or months used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage.
-    due_period (required): The due period used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage.
-    due_from (required): The relative point used for tracking a person linked to the Stage, either when they are first added to the flow or when they are processed from a previous stage.
-    instructions: The instructions for the Stage.
-    assigned_user_id: The ID of the user automatically assigned to people in this stage, or null if no user is assigned.
-    automate_time: The UTC time the Stage will automatically process any due or overdue people if it is automated, or null if it is not automated."""
-    return await _request("POST", "/addressbook/flow_stages", None, _body({"flow_id": flow_id, "name": name, "due_interval": due_interval, "due_period": due_period, "due_from": due_from, "instructions": instructions, "assigned_user_id": assigned_user_id, "automate_time": automate_time}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - flow_id (required): The Flow ID the Stage belongs to -> Run addressbook_list_flows and use the flow `id`.
+      - name (required): The Stage's name (max 50 characters; cannot be empty)
+      - due_interval (required): The number of days, weeks or months used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage
+      - due_period (required): The due period used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage (one of: days, weeks, months)
+      - due_from (required): The relative point used for tracking a person linked to the Stage, either when they are first added to the flow or when they are processed from a previous stage (one of: first_added, previous_stage)
+      - instructions (optional): The instructions for the Stage (max 65535 characters)
+      - assigned_user_id (optional): The ID of the user automatically assigned to people in this stage, or null if no user is assigned -> A ChurchSuite user ID. No list tool; it appears as `assigned_user_id` on existing flow stages/trackings.
+      - automate_time (optional): The UTC time the Stage will automatically process any due or overdue people if it is automated, or null if it is not automated"""
+    body = _body({"flow_id": flow_id, "name": name, "instructions": instructions, "due_interval": due_interval, "due_period": due_period, "due_from": due_from, "assigned_user_id": assigned_user_id, "automate_time": automate_time}, None, (), keep=())
+    return await _request("POST", "/addressbook/flow_stages", None, body)
 
 @tool("addressbook", "POST")
-async def addressbook_create_flow_tracking(flow_id: int, stage_id: int, person: dict[str, Any]) -> Any:
-    """Create a flow tracking. Create a flow tracking, linked to a person's process through a flow, with the provided settings.
-    flow_id (required): The Flow ID the Tracking is linked to.
-    stage_id (required): The Stage ID the Tracking is linked to.
-    person (required): The Tracking's Person details. Keys: type, id."""
-    return await _request("POST", "/addressbook/flow_trackings", None, _body({"flow_id": flow_id, "stage_id": stage_id, "person": person}, None, ()))
+async def addressbook_create_flow_tracking(
+    flow_id: Annotated[int, Field(description="Flow ID (flow_id) - REQUIRED. The Flow ID the Tracking is linked to. HOW TO GET IT: Run addressbook_list_flows and use the flow `id`.")],
+    stage_id: Annotated[int, Field(description="Stage ID (stage_id) - REQUIRED. The Stage ID the Tracking is linked to. HOW TO GET IT: Run addressbook_list_flow_stages (filter flow_ids) and use the stage `id`.")],
+    person: Annotated[dict[str, Any], Field(description="Person (person) - REQUIRED. The Tracking's Person details. Object keys: {type (string, required): The Person's type, indicating whether they are a Child, Contact, Customer or Giver -> For a contact use 'addressbook_contact'.; id (integer, required): The Person's ID -> Contact ID: run addressbook_list_contacts (search with `q`) and use the `id`.}")],
+) -> Any:
+    """Create a flow tracking. Create a flow tracking, linked to a person's progress through a flow, with the provided settings.
+    
+    WHAT YOU NEED TO PROVIDE
+      - flow_id (required): The Flow ID the Tracking is linked to -> Run addressbook_list_flows and use the flow `id`.
+      - stage_id (required): The Stage ID the Tracking is linked to -> Run addressbook_list_flow_stages (filter flow_ids) and use the stage `id`.
+      - person (required): The Tracking's Person details"""
+    body = _body({"flow_id": flow_id, "stage_id": stage_id, "person": person}, None, (), keep=())
+    return await _request("POST", "/addressbook/flow_trackings", None, body)
 
 @tool("addressbook", "POST")
-async def addressbook_create_key_date(name: str, colour: Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"], visible_to: Any | None = None) -> Any:
+async def addressbook_create_key_date(
+    name: Annotated[str, Field(description="Name (name) - REQUIRED. The Key Date's name. (max 50 characters; cannot be empty)")],
+    colour: Annotated[Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"], Field(description="Colour (colour) - REQUIRED. The Key Date's colour. (one of: blue, red, orange, green, purple, pink, brown, grey)")],
+    visible_to: Annotated[dict[str, Any] | None, Field(description="Visible to (visible_to) - Optional. Object keys: ONE of these shapes: {just_me (one of true): The resource should only be visible to the current user} OR {user_group_ids (list of integer): List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to -> ChurchSuite user-group IDs. No list tool; copy them from an existing record's visible_to, or ask a ChurchSuite admin.}")] = None,
+) -> Any:
     """Create a key date. Create a key date with the provided settings.
-    name (required): The Key Date's name.
-    colour (required): The Key Date's colour.
-    visible_to: Object, one of these shapes: {just_me: must be true} OR {user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to."""
-    return await _request("POST", "/addressbook/key_dates", None, _body({"name": name, "colour": colour, "visible_to": visible_to}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - name (required): The Key Date's name (max 50 characters; cannot be empty)
+      - colour (required): The Key Date's colour (one of: blue, red, orange, green, purple, pink, brown, grey)
+      - visible_to (optional): Visible to"""
+    body = _body({"name": name, "colour": colour, "visible_to": visible_to}, None, (), keep=())
+    return await _request("POST", "/addressbook/key_dates", None, body)
 
 @tool("addressbook", "POST")
-async def addressbook_create_key_date_resource(key_date_id: int, resource: dict[str, Any], date: str, description: str | None = None) -> Any:
+async def addressbook_create_key_date_resource(
+    key_date_id: Annotated[int, Field(description="Key date ID (key_date_id) - REQUIRED. The Key Date's ID. HOW TO GET IT: Run addressbook_list_key_dates and use the key date `id`.")],
+    resource: Annotated[dict[str, Any], Field(description="Resource (resource) - REQUIRED. The resource to link to the Key Date. Object keys: {id (integer, required): The ID of the resource -> Contact ID: addressbook_list_contacts.}")],
+    date: Annotated[str, Field(description="Date (date) - REQUIRED. The date of the Key Date Resource. (date as YYYY-MM-DD)")],
+    description: Annotated[str | None, Field(description="Description (description) - Optional. The description of this Key Date Resource. (max 65535 characters)")] = None,
+) -> Any:
     """Create a key date resource. Create a key date resource adding a contact to a key date
-    key_date_id (required): The Key Date's ID.
-    resource (required): The resource to link to the Key Date. Keys: id.
-    date (required): The date of the Key Date Resource.
-    description: The description of this Key Date Resource."""
-    return await _request("POST", "/addressbook/key_date_resources", None, _body({"key_date_id": key_date_id, "resource": resource, "date": date, "description": description}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - key_date_id (required): The Key Date's ID -> Run addressbook_list_key_dates and use the key date `id`.
+      - resource (required): The resource to link to the Key Date
+      - date (required): The date of the Key Date Resource (date as YYYY-MM-DD)
+      - description (optional): The description of this Key Date Resource (max 65535 characters)"""
+    body = _body({"key_date_id": key_date_id, "resource": resource, "date": date, "description": description}, None, (), keep=())
+    return await _request("POST", "/addressbook/key_date_resources", None, body)
 
 @tool("addressbook", "POST")
-async def addressbook_create_tag(name: str, is_smart: bool, category_id: int | None = None, description: str | None = None, colour: Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"] | None = None, visible_to: Any | None = None, pinned_icon: Literal["tick", "cross", "archive", "warning", "flag", "magic", "star", "profile", "user", "couple", "group", "pledge", "education", "job", "gift", "role", "duration", "smiley-happy", "smiley-neutral", "smiley-sad"] | None = None) -> Any:
-    """Create a tag
-    name (required): The Tag's name.
-    is_smart (required): Whether the Tag is smart or fixed.
-    category_id: The Tag's Category ID. This sets the default colour of the Tag to the Category's colour.
-    description: The description of the Tag.
-    colour: The name of the colour of the Tag. If not specified, the Category colour will be used where applicable, falling back to 'blue'.
-    visible_to: Object, one of these shapes: {just_me: must be true} OR {user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to.
-    pinned_icon: Pin this Tag by specifying an icon. Pinned tags give you a quick way to see your most important tags at a glance; they're displayed at the top of the page when viewing a person's profile."""
-    return await _request("POST", "/addressbook/tags", None, _body({"name": name, "is_smart": is_smart, "category_id": category_id, "description": description, "colour": colour, "visible_to": visible_to, "pinned_icon": pinned_icon}, None, ()))
+async def addressbook_create_tag(
+    name: Annotated[str, Field(description="Name (name) - REQUIRED. The Tag's name. (max 50 characters; cannot be empty)")],
+    is_smart: Annotated[bool, Field(description="Is smart (is_smart) - REQUIRED. Whether the Tag is smart or fixed.")],
+    category_id: Annotated[int | None, Field(description="Category ID (category_id) - Optional. The Tag's Category ID. This sets the default colour of the Tag to the Category's colour. HOW TO GET IT: Run addressbook_list_tag_categories and use the `id` of the category.")] = None,
+    description: Annotated[str | None, Field(description="Description (description) - Optional. The description of the Tag. (max 65535 characters)")] = None,
+    colour: Annotated[Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"] | None, Field(description="Colour (colour) - Optional. The name of the colour of the Tag. If not specified, the Category colour will be used where applicable, falling back to 'blue'. (one of: blue, red, orange, green, purple, pink, brown, grey)")] = None,
+    visible_to: Annotated[dict[str, Any] | None, Field(description="Visible to (visible_to) - Optional. Object keys: ONE of these shapes: {just_me (one of true): The resource should only be visible to the current user} OR {user_group_ids (list of integer): List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to -> ChurchSuite user-group IDs. No list tool; copy them from an existing record's visible_to, or ask a ChurchSuite admin.}")] = None,
+    pinned_icon: Annotated[Literal["tick", "cross", "archive", "warning", "flag", "magic", "star", "profile", "user", "couple", "group", "pledge", "education", "job", "gift", "role", "duration", "smiley-happy", "smiley-neutral", "smiley-sad"] | None, Field(description="Pinned icon (pinned_icon) - Optional. Pin this Tag by specifying an icon. Pinned tags give you a quick way to see your most important tags at a glance; they're displayed at the top of the page when viewing a person's profile. (one of: tick, cross, archive, warning, flag, magic, star, profile, user, couple, group, pledge, education, job, gift, role, duration, smiley-happy, smiley-neutral, smiley-sad)")] = None,
+) -> Any:
+    """Create a tag.
+    
+    WHAT YOU NEED TO PROVIDE
+      - name (required): The Tag's name (max 50 characters; cannot be empty)
+      - is_smart (required): Whether the Tag is smart or fixed
+      - category_id (optional): The Tag's Category ID. This sets the default colour of the Tag to the Category's colour -> Run addressbook_list_tag_categories and use the `id` of the category.
+      - description (optional): The description of the Tag (max 65535 characters)
+      - colour (optional): The name of the colour of the Tag. If not specified, the Category colour will be used where applicable, falling back to 'blue' (one of: blue, red, orange, green, purple, pink, brown, grey)
+      - visible_to (optional): Visible to
+      - pinned_icon (optional): Pin this Tag by specifying an icon. Pinned tags give you a quick way to see your most important tags at a glance; they're displayed at the top of the page when viewing a person's profile (one of: tick, cross, archive, warning, flag, magic, star, profile, user, couple, group, pledge, education, job, gift, role, duration, smiley-happy, smiley-neutral, smiley-sad)"""
+    body = _body({"name": name, "category_id": category_id, "description": description, "colour": colour, "is_smart": is_smart, "visible_to": visible_to, "pinned_icon": pinned_icon}, None, (), keep=())
+    return await _request("POST", "/addressbook/tags", None, body)
 
 @tool("addressbook", "POST")
-async def addressbook_create_tag_resource(person: dict[str, Any], tag_id: int) -> Any:
+async def addressbook_create_tag_resource(
+    person: Annotated[dict[str, Any], Field(description="Person (person) - REQUIRED. The Person to link to the Tag. Object keys: {type (one of addressbook_contact, required): The Person's type, indicating whether they are a Child, Contact, Customer or Giver -> For a contact use 'addressbook_contact'.; id (integer, required): The Person's ID -> Contact ID: run addressbook_list_contacts (search with `q`) and use the `id`.}")],
+    tag_id: Annotated[int, Field(description="Tag ID (tag_id) - REQUIRED. The Tag's ID. HOW TO GET IT: Run addressbook_list_tags and use the tag `id`.")],
+) -> Any:
     """Create a tag resource. Create a tag resource linking a contact to a tag
-    person (required): The Person to link to the Tag. Keys: type, id.
-    tag_id (required): The Tag's ID."""
-    return await _request("POST", "/addressbook/tag_resources", None, _body({"person": person, "tag_id": tag_id}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - person (required): The Person to link to the Tag
+      - tag_id (required): The Tag's ID -> Run addressbook_list_tags and use the tag `id`."""
+    body = _body({"person": person, "tag_id": tag_id}, None, (), keep=())
+    return await _request("POST", "/addressbook/tag_resources", None, body)
 
 @tool("addressbook", "PUT")
-async def addressbook_edit_contact(id: int, first_name: str | None = None, last_name: str | None = None, middle_name: str | None = None, title: str | None = None, formal_name: str | None = None, former_name: str | None = None, email: str | None = None, mobile: str | None = None, telephone: str | None = None, address: dict[str, Any] | None = None, sex: Literal["female", "male"] | None = None, date_of_birth: str | None = None, marital_status: Literal["single", "married", "engaged", "partnered", "separated", "divorced", "widowed"] | None = None, spouse_id: int | None = None, job: str | None = None, employer: str | None = None, work_telephone: str | None = None, custom_fields: list[Any] | None = None, communication: dict[str, Any] | None = None, login: dict[str, Any] | None = None, privacy: dict[str, Any] | None = None, all_sites: bool | None = None, site_ids: list[int] | None = None, set_null: list[str] | None = None) -> Any:
+async def addressbook_edit_contact(
+    id: Annotated[int, Field(description="ID (id) - REQUIRED. ID of the contact to change. Find it with addressbook_list_contacts (use `q` to search) or the matching get tool.")],
+    first_name: Annotated[str | None, Field(description="First name (first_name) - Optional - leave out to keep the current value. The first name of the Contact. (max 50 characters; cannot be empty)")] = None,
+    last_name: Annotated[str | None, Field(description="Last name (last_name) - Optional - leave out to keep the current value. The last name of the Contact. (max 50 characters; cannot be empty)")] = None,
+    middle_name: Annotated[str | None, Field(description="Middle name (middle_name) - Optional - leave out to keep the current value. The middle name of the Contact. (max 50 characters)")] = None,
+    title: Annotated[str | None, Field(description="Title (title) - Optional - leave out to keep the current value. The title of the Contact. (max 25 characters)")] = None,
+    formal_name: Annotated[str | None, Field(description="Formal name (formal_name) - Optional - leave out to keep the current value. The formal name of the Contact. (max 50 characters)")] = None,
+    former_name: Annotated[str | None, Field(description="Former name (former_name) - Optional - leave out to keep the current value. Use this if a Contact has changed their last name and you want to record their previous last name. I.e. someone's maiden name. (max 50 characters)")] = None,
+    email: Annotated[str | None, Field(description="Email (email) - Optional - leave out to keep the current value. The Contact's email address. (max 100 characters; an email address)")] = None,
+    mobile: Annotated[str | None, Field(description="Mobile (mobile) - Optional - leave out to keep the current value. The Contact's mobile number. (max 20 characters)")] = None,
+    telephone: Annotated[str | None, Field(description="Telephone (telephone) - Optional - leave out to keep the current value. The Contact's telephone number. (max 20 characters)")] = None,
+    address: Annotated[dict[str, Any] | None, Field(description="Address (address) - Optional - leave out to keep the current value. Edit a street Address. Object keys: {line_1 (string, required): The first line of the Address; line_2 (string, required): The second line of the Address; line_3 (string, required): The third line of the Address; city (string, required): The city of the Address; county (string, required): The county of the Address; country (string, required): The country of the Address, in ISO3166 alpha 2 format; postcode (string, required): The postcode of the Address}")] = None,
+    sex: Annotated[Literal["female", "male"] | None, Field(description="Sex (sex) - Optional - leave out to keep the current value. The sex of the Contact. (one of: female, male)")] = None,
+    date_of_birth: Annotated[str | None, Field(description="Date of birth (date_of_birth) - Optional - leave out to keep the current value. The Contact's date of birth. (date as YYYY-MM-DD)")] = None,
+    marital_status: Annotated[Literal["single", "married", "engaged", "partnered", "separated", "divorced", "widowed"] | None, Field(description="Marital status (marital_status) - Optional - leave out to keep the current value. The Contact's marital status. (one of: single, married, engaged, partnered, separated, divorced, widowed)")] = None,
+    spouse_id: Annotated[int | None, Field(description="Spouse ID (spouse_id) - Optional - leave out to keep the current value. The Contact ID for the Contact's spouse. HOW TO GET IT: Run addressbook_list_contacts and use the spouse's contact `id`.")] = None,
+    job: Annotated[str | None, Field(description="Job (job) - Optional - leave out to keep the current value. The job of the Contact. (max 100 characters)")] = None,
+    employer: Annotated[str | None, Field(description="Employer (employer) - Optional - leave out to keep the current value. The employer of the Contact. (max 100 characters)")] = None,
+    work_telephone: Annotated[str | None, Field(description="Work telephone (work_telephone) - Optional - leave out to keep the current value. The Contact's work telephone number. (max 20 characters)")] = None,
+    custom_fields: Annotated[list[dict[str, Any]] | None, Field(description="Custom fields (custom_fields) - Optional - leave out to keep the current value. Custom Field responses for this resource. HOW TO GET IT: Use addressbook_list_custom_fields to find each field's `id` and type. Object keys: list of ONE of these shapes: {id (integer, required): The ID of the Custom Field; field_type (one of text/textarea/phone/date, required): A discriminator to determine the type of Custom Field this response belongs to; value (string, required): The raw value of a text, textarea, phone or date} OR {id (integer, required): The ID of the Custom Field; field_type (one of email, required): A discriminator to determine the type of Custom Field this response belongs to; value (string, required): The raw value of an email} OR {id (integer, required): The ID of the Custom Field; field_type (one of radio/select, required): A discriminator to determine the type of Custom Field this response belongs to; value ({id (string, required)}, required): The UUID of the selected response for a radio or select field} OR {id (integer, required): The ID of the Custom Field; field_type (one of checkbox, required): A discriminator to determine the type of Custom Field this response belongs to; value (list of {id (string, required)}, required): A list of UUIDs of the selected responses for a checkbox field}")] = None,
+    communication: Annotated[dict[str, Any] | None, Field(description="Communication (communication) - Optional - leave out to keep the current value. The person's communication preferences. Object keys: {general_email (boolean, required): Whether this person has consented to receiving general emails; general_sms (boolean, required): Whether this person has consented to receiving general SMS messages; phone (boolean, required): Whether this person has consented to receiving phone calls; post (boolean, required): Whether this person has consented to receiving post; rota_email (boolean, required): Whether this person has consented to receiving rota emails; rota_sms (boolean, required): Whether this person has consented to receiving rota SMS messages}")] = None,
+    login: Annotated[dict[str, Any] | None, Field(description="Login (login) - Optional - leave out to keep the current value. My ChurchSuite/CharitySuite login information. Object keys: {enabled (boolean, required): Whether the person is able to log into My; invited (boolean, required): Whether the person has been invited to create a My account}")] = None,
+    privacy: Annotated[dict[str, Any] | None, Field(description="Privacy (privacy) - Optional - leave out to keep the current value. Edit the Contact's privacy settings. Object keys: {name_visible (boolean, required): Whether the Contact's name is visible in My; address_visible (boolean, required): Whether the Contact's address is visible in My. This will only be respected if name_visible is true, else it will not be visible; mobile_visible (boolean, required): Whether the Contact's mobile is visible in My. This will only be respected if name_visible is true, else it will not be visible; email_visible (boolean, required): Whether the Contact's email is visible in My. This will only be respected if name_visible is true, else it will not be visible; telephone_visible (boolean, required): Whether the Contact's mobile is visible in My. This will only be respected if name_visible is true, else it will not be visible}")] = None,
+    all_sites: Annotated[bool | None, Field(description="All sites (all_sites) - Optional - leave out to keep the current value. Whether the Contact belongs to All Sites.")] = None,
+    site_ids: Annotated[list[int] | None, Field(description="Site IDs (site_ids) - Optional - leave out to keep the current value. An array of Site IDs that the Contact belongs to. If `all_sites` is `true`, this will be overridden. You are only able to add site IDs for sites you have the relevant permission for. HOW TO GET IT: No list tool for sites. Copy `site_ids` from an existing record (e.g. addressbook_get_contact), or use all_sites=true for every site.")] = None,
+    set_null: Annotated[list[Literal["address", "sex", "date_of_birth", "marital_status", "spouse_id"]] | None, Field(description="Optional. Names of fields to CLEAR (set to null). Allowed: address, sex, date_of_birth, marital_status, spouse_id. Leave a field out of both its own parameter and this list to keep it unchanged.")] = None,
+) -> Any:
     """Update a contact. Update a single contact identified by ID.
-    first_name: The first name of the Contact.
-    last_name: The last name of the Contact.
-    middle_name: The middle name of the Contact.
-    title: The title of the Contact.
-    formal_name: The formal name of the Contact.
-    former_name: Use this if a Contact has changed their last name and you want to record their previous last name. I.e. someone's maiden name.
-    email: The Contact's email address.
-    mobile: The Contact's mobile number.
-    telephone: The Contact's telephone number.
-    address: Edit a street Address. Object keys: line_1 (string, required): The first line of the Address; line_2 (string, required): The second line of the Address; line_3 (string, required): The third line of the Address; city (string, required): The city of the Address; county (string, required): The county of the Address; country (string or null, required): The country of the Address, in ISO3166 alpha 2 format; postcode (string, required): The postcode of the Address.
-    sex: The sex of the Contact.
-    date_of_birth: The Contact's date of birth.
-    marital_status: The Contact's marital status.
-    spouse_id: The Contact ID for the Contact's spouse.
-    job: The job of the Contact.
-    employer: The employer of the Contact.
-    work_telephone: The Contact's work telephone number.
-    custom_fields: Custom Field responses for this resource
-    communication: The person's communication preferences. Object keys: general_email (boolean, required): Whether this person has consented to receiving general emails; general_sms (boolean, required): Whether this person has consented to receiving general SMS messages; phone (boolean, required): Whether this person has consented to receiving phone calls; post (boolean, required): Whether this person has consented to receiving post; rota_email (boolean, required): Whether this person has consented to receiving rota emails; rota_sms (boolean, required): Whether this person has consented to receiving rota SMS messages.
-    login: My ChurchSuite/CharitySuite login information. Keys: enabled, invited.
-    privacy: Edit the Contact's privacy settings. Object keys: name_visible (boolean, required): Whether the Contact's name is visible in My; address_visible (boolean, required): Whether the Contact's address is visible in My. This will only be respected if name_visible is true, else it will not be visible; mobile_visible (boolean, required): Whether the Contact's mobile is visible in My. This will only be respected if name_visible is true, else it will not be visible; email_visible (boolean, required): Whether the Contact's email is visible in My. This will only be respected if name_visible is true, else it will not be visible; telephone_visible (boolean, required): Whether the Contact's mobile is visible in My. This will only be respected if name_visible is true, else it will not be visible.
-    all_sites: Whether the Contact belongs to All Sites.
-    site_ids: An array of Site IDs that the Contact belongs to. If `all_sites` is `true`, this will be overridden. You are only able to add site IDs for sites you have the relevant permission for.
-    set_null: names of nullable fields to clear (address, sex, date_of_birth, marital_status, spouse_id)."""
-    return await _request("PUT", f"/addressbook/contacts/{id}", None, _body({"first_name": first_name, "last_name": last_name, "middle_name": middle_name, "title": title, "formal_name": formal_name, "former_name": former_name, "email": email, "mobile": mobile, "telephone": telephone, "address": address, "sex": sex, "date_of_birth": date_of_birth, "marital_status": marital_status, "spouse_id": spouse_id, "job": job, "employer": employer, "work_telephone": work_telephone, "custom_fields": custom_fields, "communication": communication, "login": login, "privacy": privacy, "all_sites": all_sites, "site_ids": site_ids}, set_null, ("address", "sex", "date_of_birth", "marital_status", "spouse_id", )))
+    
+    WHAT YOU NEED TO PROVIDE
+      - id (required): ID of the contact to change. Find it with addressbook_list_contacts (use `q` to search) or the matching get tool.
+      - first_name (optional): The first name of the Contact (max 50 characters; cannot be empty)
+      - last_name (optional): The last name of the Contact (max 50 characters; cannot be empty)
+      - middle_name (optional): The middle name of the Contact (max 50 characters)
+      - title (optional): The title of the Contact (max 25 characters)
+      - formal_name (optional): The formal name of the Contact (max 50 characters)
+      - former_name (optional): Use this if a Contact has changed their last name and you want to record their previous last name. I.e. someone's maiden name (max 50 characters)
+      - email (optional): The Contact's email address (max 100 characters; an email address)
+      - mobile (optional): The Contact's mobile number (max 20 characters)
+      - telephone (optional): The Contact's telephone number (max 20 characters)
+      - address (optional): Edit a street Address
+      - sex (optional): The sex of the Contact (one of: female, male)
+      - date_of_birth (optional): The Contact's date of birth (date as YYYY-MM-DD)
+      - marital_status (optional): The Contact's marital status (one of: single, married, engaged, partnered, separated, divorced, widowed)
+      - spouse_id (optional): The Contact ID for the Contact's spouse -> Run addressbook_list_contacts and use the spouse's contact `id`.
+      - job (optional): The job of the Contact (max 100 characters)
+      - employer (optional): The employer of the Contact (max 100 characters)
+      - work_telephone (optional): The Contact's work telephone number (max 20 characters)
+      - custom_fields (optional): Custom Field responses for this resource -> Use addressbook_list_custom_fields to find each field's `id` and type.
+      - communication (optional): The person's communication preferences
+      - login (optional): My ChurchSuite/CharitySuite login information
+      - privacy (optional): Edit the Contact's privacy settings
+      - all_sites (optional): Whether the Contact belongs to All Sites
+      - site_ids (optional): An array of Site IDs that the Contact belongs to. If `all_sites` is `true`, this will be overridden. You are only able to add site IDs for sites you have the relevant permission for -> No list tool for sites. Copy `site_ids` from an existing record (e.g. addressbook_get_contact), or use all_sites=true for every site.
+      - set_null (optional): list of fields to clear: address, sex, date_of_birth, marital_status, spouse_id."""
+    body = _body({"first_name": first_name, "last_name": last_name, "middle_name": middle_name, "title": title, "formal_name": formal_name, "former_name": former_name, "email": email, "mobile": mobile, "telephone": telephone, "address": address, "sex": sex, "date_of_birth": date_of_birth, "marital_status": marital_status, "spouse_id": spouse_id, "job": job, "employer": employer, "work_telephone": work_telephone, "custom_fields": custom_fields, "communication": communication, "login": login, "privacy": privacy, "all_sites": all_sites, "site_ids": site_ids}, set_null, ("address", "sex", "date_of_birth", "marital_status", "spouse_id", ), keep=())
+    return await _request("PUT", f"/addressbook/contacts/{id}", None, body)
 
 @tool("addressbook", "PUT")
-async def addressbook_edit_flow_stage(id: int, name: str, instructions: str, due_interval: int, due_period: Literal["days", "weeks", "months"], due_from: Literal["first_added", "previous_stage"], assigned_user_id: int | None, automate_time: str | None) -> Any:
+async def addressbook_edit_flow_stage(
+    id: Annotated[int, Field(description="ID (id) - REQUIRED. ID of the flow stage to change. Find it with addressbook_list_flow_stages (use `q` to search) or the matching get tool.")],
+    name: Annotated[str, Field(description="Name (name) - REQUIRED. The Stage's name. (max 50 characters; cannot be empty)")],
+    instructions: Annotated[str, Field(description="Instructions (instructions) - REQUIRED. The instructions for the Stage. (max 65535 characters)")],
+    due_interval: Annotated[int, Field(description="Due interval (due_interval) - REQUIRED. The number of days, weeks or months used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage.")],
+    due_period: Annotated[Literal["days", "weeks", "months"], Field(description="Due period (due_period) - REQUIRED. The due period used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage. (one of: days, weeks, months)")],
+    due_from: Annotated[Literal["first_added", "previous_stage"], Field(description="Due from (due_from) - REQUIRED. The relative point used for tracking a person linked to the Stage, either when they are first added to the flow or when they are processed from a previous stage. (one of: first_added, previous_stage)")],
+    assigned_user_id: Annotated[int | None, Field(description="Assigned user ID (assigned_user_id) - REQUIRED. The ID of the user automatically assigned to people in this stage, or null if no user is assigned. HOW TO GET IT: A ChurchSuite user ID. No list tool; it appears as `assigned_user_id` on existing flow stages/trackings.")],
+    automate_time: Annotated[str | None, Field(description="Automate time (automate_time) - REQUIRED. The UTC time the Stage will automatically process any due or overdue people if it is automated, or null if it is not automated.")],
+) -> Any:
     """Update a flow stage. Update a single stage identified by ID.
-    name (required): The Stage's name.
-    instructions (required): The instructions for the Stage.
-    due_interval (required): The number of days, weeks or months used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage.
-    due_period (required): The due period used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage.
-    due_from (required): The relative point used for tracking a person linked to the Stage, either when they are first added to the flow or when they are processed from a previous stage.
-    assigned_user_id (required): The ID of the user automatically assigned to people in this stage, or null if no user is assigned.
-    automate_time (required): The UTC time the Stage will automatically process any due or overdue people if it is automated, or null if it is not automated."""
-    return await _request("PUT", f"/addressbook/flow_stages/{id}", None, _body({"name": name, "instructions": instructions, "due_interval": due_interval, "due_period": due_period, "due_from": due_from, "assigned_user_id": assigned_user_id, "automate_time": automate_time}, None, (), keep=("assigned_user_id", "automate_time", )))
+    
+    WHAT YOU NEED TO PROVIDE
+      - id (required): ID of the flow stage to change. Find it with addressbook_list_flow_stages (use `q` to search) or the matching get tool.
+      - name (required): The Stage's name (max 50 characters; cannot be empty)
+      - instructions (required): The instructions for the Stage (max 65535 characters)
+      - due_interval (required): The number of days, weeks or months used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage
+      - due_period (required): The due period used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage (one of: days, weeks, months)
+      - due_from (required): The relative point used for tracking a person linked to the Stage, either when they are first added to the flow or when they are processed from a previous stage (one of: first_added, previous_stage)
+      - assigned_user_id (required): The ID of the user automatically assigned to people in this stage, or null if no user is assigned -> A ChurchSuite user ID. No list tool; it appears as `assigned_user_id` on existing flow stages/trackings.
+      - automate_time (required): The UTC time the Stage will automatically process any due or overdue people if it is automated, or null if it is not automated"""
+    body = _body({"name": name, "instructions": instructions, "due_interval": due_interval, "due_period": due_period, "due_from": due_from, "assigned_user_id": assigned_user_id, "automate_time": automate_time}, None, (), keep=("assigned_user_id", "automate_time", ))
+    return await _request("PUT", f"/addressbook/flow_stages/{id}", None, body)
 
 @tool("addressbook", "PUT")
-async def addressbook_edit_flow_tracking(id: int, due_date: str, assigned_user_id: int | None) -> Any:
-    """Update a flow tracking. Update a single flow tracking, linked to a person's process through a flow, identified by ID.
-    due_date (required): The Tracking's due date.
-    assigned_user_id (required): The Tracking's assigned user ID, or null if not assigned to a user."""
-    return await _request("PUT", f"/addressbook/flow_trackings/{id}", None, _body({"due_date": due_date, "assigned_user_id": assigned_user_id}, None, (), keep=("assigned_user_id", )))
+async def addressbook_edit_flow_tracking(
+    id: Annotated[int, Field(description="ID (id) - REQUIRED. ID of the flow tracking to change. Find it with addressbook_list_flow_trackings (use `q` to search) or the matching get tool.")],
+    due_date: Annotated[str, Field(description="Due date (due_date) - REQUIRED. The Tracking's due date. (date as YYYY-MM-DD)")],
+    assigned_user_id: Annotated[int | None, Field(description="Assigned user ID (assigned_user_id) - REQUIRED. The Tracking's assigned user ID, or null if not assigned to a user. HOW TO GET IT: A ChurchSuite user ID. No list tool; it appears as `assigned_user_id` on existing flow stages/trackings.")],
+) -> Any:
+    """Update a flow tracking. Update a single flow tracking, linked to a person's progress through a flow, identified by ID.
+    
+    WHAT YOU NEED TO PROVIDE
+      - id (required): ID of the flow tracking to change. Find it with addressbook_list_flow_trackings (use `q` to search) or the matching get tool.
+      - due_date (required): The Tracking's due date (date as YYYY-MM-DD)
+      - assigned_user_id (required): The Tracking's assigned user ID, or null if not assigned to a user -> A ChurchSuite user ID. No list tool; it appears as `assigned_user_id` on existing flow stages/trackings."""
+    body = _body({"due_date": due_date, "assigned_user_id": assigned_user_id}, None, (), keep=("assigned_user_id", ))
+    return await _request("PUT", f"/addressbook/flow_trackings/{id}", None, body)
 
 @tool("addressbook", "PUT")
-async def addressbook_edit_key_date(id: int, name: str, colour: Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"], visible_to: Any | None) -> Any:
+async def addressbook_edit_key_date(
+    id: Annotated[int, Field(description="ID (id) - REQUIRED. ID of the key date to change. Find it with addressbook_list_key_dates (use `q` to search) or the matching get tool.")],
+    name: Annotated[str, Field(description="Name (name) - REQUIRED. The Key Date's name. (max 50 characters; cannot be empty)")],
+    colour: Annotated[Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"], Field(description="Colour (colour) - REQUIRED. The Key Date's colour. (one of: blue, red, orange, green, purple, pink, brown, grey)")],
+    visible_to: Annotated[dict[str, Any] | None, Field(description="Visible to (visible_to) - REQUIRED. Who the resource is visible to. Null if there are no restrictions. If `just_me` is true, `user_group_ids` must be empty or not set. If `just_me` is false, `user_group_ids` must contain at least one User Group ID. Object keys: ONE of these shapes: {just_me (one of false): The resource should only be visible to the current user; user_group_ids (list of integer, required): List of user group IDs the resource is visible to -> ChurchSuite user-group IDs. No list tool; copy them from an existing record's visible_to, or ask a ChurchSuite admin.} OR {just_me (one of true, required): The resource should only be visible to the current user; user_group_ids (list of integer): List of user group IDs the resource is visible to -> ChurchSuite user-group IDs. No list tool; copy them from an existing record's visible_to, or ask a ChurchSuite admin.}")],
+) -> Any:
     """Update a key date. Update a single key date identified by ID.
-    name (required): The Key Date's name.
-    colour (required): The Key Date's colour.
-    visible_to (required): Who the resource is visible to. Null if there are no restrictions. If `just_me` is true, `user_group_ids` must be empty or not set. If `just_me` is false, `user_group_ids` must contain at least one User Group ID. Object, one of these shapes: {just_me: must be false, user_group_ids: array of integer [required]} OR {just_me: must be true [required], user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to."""
-    return await _request("PUT", f"/addressbook/key_dates/{id}", None, _body({"name": name, "colour": colour, "visible_to": visible_to}, None, (), keep=("visible_to", )))
+    
+    WHAT YOU NEED TO PROVIDE
+      - id (required): ID of the key date to change. Find it with addressbook_list_key_dates (use `q` to search) or the matching get tool.
+      - name (required): The Key Date's name (max 50 characters; cannot be empty)
+      - colour (required): The Key Date's colour (one of: blue, red, orange, green, purple, pink, brown, grey)
+      - visible_to (required): Who the resource is visible to. Null if there are no restrictions. If `just_me` is true, `user_group_ids` must be empty or not set. If `just_me` is false, `user_group_ids` must contain at least one User Group ID"""
+    body = _body({"name": name, "colour": colour, "visible_to": visible_to}, None, (), keep=("visible_to", ))
+    return await _request("PUT", f"/addressbook/key_dates/{id}", None, body)
 
 @tool("addressbook", "PUT")
-async def addressbook_edit_key_date_resource(id: int, date: str, description: str) -> Any:
+async def addressbook_edit_key_date_resource(
+    id: Annotated[int, Field(description="ID (id) - REQUIRED. ID of the key date resource to change. Find it with addressbook_list_key_date_resources (use `q` to search) or the matching get tool.")],
+    date: Annotated[str, Field(description="Date (date) - REQUIRED. The date of the Key Date Resource. (date as YYYY-MM-DD)")],
+    description: Annotated[str, Field(description="Description (description) - REQUIRED. The description of this Key Date Resource. (max 65535 characters)")],
+) -> Any:
     """Update a key date resource. Update a single key date resource identified by ID.
-    date (required): The date of the Key Date Resource.
-    description (required): The description of this Key Date Resource."""
-    return await _request("PUT", f"/addressbook/key_date_resources/{id}", None, _body({"date": date, "description": description}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - id (required): ID of the key date resource to change. Find it with addressbook_list_key_date_resources (use `q` to search) or the matching get tool.
+      - date (required): The date of the Key Date Resource (date as YYYY-MM-DD)
+      - description (required): The description of this Key Date Resource (max 65535 characters)"""
+    body = _body({"date": date, "description": description}, None, (), keep=())
+    return await _request("PUT", f"/addressbook/key_date_resources/{id}", None, body)
 
 @tool("addressbook", "PUT")
-async def addressbook_edit_tag(id: int, name: str, category_id: int | None, description: str, colour: Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"], visible_to: Any | None, pinned_icon: Literal["tick", "cross", "archive", "warning", "flag", "magic", "star", "profile", "user", "couple", "group", "pledge", "education", "job", "gift", "role", "duration", "smiley-happy", "smiley-neutral", "smiley-sad"] | None) -> Any:
-    """Update a tag
-    name (required): The Tag's name.
-    category_id (required): The Tag's Category ID.
-    description (required): The description of the Tag.
-    colour (required): The name of the colour of the Tag.
-    visible_to (required): Who the resource is visible to. Null if there are no restrictions. If `just_me` is true, `user_group_ids` must be empty or not set. If `just_me` is false, `user_group_ids` must contain at least one User Group ID. Object, one of these shapes: {just_me: must be false, user_group_ids: array of integer [required]} OR {just_me: must be true [required], user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to.
-    pinned_icon (required): Pin this Tag by specifying an icon. This will be displayed within the application."""
-    return await _request("PUT", f"/addressbook/tags/{id}", None, _body({"name": name, "category_id": category_id, "description": description, "colour": colour, "visible_to": visible_to, "pinned_icon": pinned_icon}, None, (), keep=("category_id", "visible_to", "pinned_icon", )))
+async def addressbook_edit_tag(
+    id: Annotated[int, Field(description="ID (id) - REQUIRED. ID of the tag to change. Find it with addressbook_list_tags (use `q` to search) or the matching get tool.")],
+    name: Annotated[str, Field(description="Name (name) - REQUIRED. The Tag's name. (max 50 characters; cannot be empty)")],
+    category_id: Annotated[int | None, Field(description="Category ID (category_id) - REQUIRED. The Tag's Category ID. HOW TO GET IT: Run addressbook_list_tag_categories and use the `id` of the category.")],
+    description: Annotated[str, Field(description="Description (description) - REQUIRED. The description of the Tag. (max 65535 characters)")],
+    colour: Annotated[Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"], Field(description="Colour (colour) - REQUIRED. The name of the colour of the Tag. (one of: blue, red, orange, green, purple, pink, brown, grey)")],
+    visible_to: Annotated[dict[str, Any] | None, Field(description="Visible to (visible_to) - REQUIRED. Who the resource is visible to. Null if there are no restrictions. If `just_me` is true, `user_group_ids` must be empty or not set. If `just_me` is false, `user_group_ids` must contain at least one User Group ID. Object keys: ONE of these shapes: {just_me (one of false): The resource should only be visible to the current user; user_group_ids (list of integer, required): List of user group IDs the resource is visible to -> ChurchSuite user-group IDs. No list tool; copy them from an existing record's visible_to, or ask a ChurchSuite admin.} OR {just_me (one of true, required): The resource should only be visible to the current user; user_group_ids (list of integer): List of user group IDs the resource is visible to -> ChurchSuite user-group IDs. No list tool; copy them from an existing record's visible_to, or ask a ChurchSuite admin.}")],
+    pinned_icon: Annotated[Literal["tick", "cross", "archive", "warning", "flag", "magic", "star", "profile", "user", "couple", "group", "pledge", "education", "job", "gift", "role", "duration", "smiley-happy", "smiley-neutral", "smiley-sad"] | None, Field(description="Pinned icon (pinned_icon) - REQUIRED. Pin this Tag by specifying an icon. This will be displayed within the application. (one of: tick, cross, archive, warning, flag, magic, star, profile, user, couple, group, pledge, education, job, gift, role, duration, smiley-happy, smiley-neutral, smiley-sad)")],
+) -> Any:
+    """Update a tag.
+    
+    WHAT YOU NEED TO PROVIDE
+      - id (required): ID of the tag to change. Find it with addressbook_list_tags (use `q` to search) or the matching get tool.
+      - name (required): The Tag's name (max 50 characters; cannot be empty)
+      - category_id (required): The Tag's Category ID -> Run addressbook_list_tag_categories and use the `id` of the category.
+      - description (required): The description of the Tag (max 65535 characters)
+      - colour (required): The name of the colour of the Tag (one of: blue, red, orange, green, purple, pink, brown, grey)
+      - visible_to (required): Who the resource is visible to. Null if there are no restrictions. If `just_me` is true, `user_group_ids` must be empty or not set. If `just_me` is false, `user_group_ids` must contain at least one User Group ID
+      - pinned_icon (required): Pin this Tag by specifying an icon. This will be displayed within the application (one of: tick, cross, archive, warning, flag, magic, star, profile, user, couple, group, pledge, education, job, gift, role, duration, smiley-happy, smiley-neutral, smiley-sad)"""
+    body = _body({"name": name, "category_id": category_id, "description": description, "colour": colour, "visible_to": visible_to, "pinned_icon": pinned_icon}, None, (), keep=("category_id", "visible_to", "pinned_icon", ))
+    return await _request("PUT", f"/addressbook/tags/{id}", None, body)
 
 @tool("addressbook", "DELETE")
 async def addressbook_delete_contact(id: int) -> Any:
@@ -698,36 +891,69 @@ async def calendar_list_tickets(event_id: int | None = None, page: int | None = 
     return await _request("GET", "/calendar/tickets", {"event_id": event_id, "page": page, "per_page": per_page})
 
 @tool("calendar", "POST")
-async def calendar_create_category(name: str, color: str, brand_id: int) -> Any:
+async def calendar_create_category(
+    name: Annotated[str, Field(description="Name (name) - REQUIRED. The Category's name. (max 50 characters; cannot be empty)")],
+    color: Annotated[str, Field(description="Color (color) - REQUIRED. The Category's hexadecimal colour value.")],
+    brand_id: Annotated[int, Field(description="Brand ID (brand_id) - REQUIRED. The Brand ID linked to the Category. HOW TO GET IT: No list tool. Copy `brand_id` from an existing category or event (calendar_get_category / calendar_get_event).")],
+) -> Any:
     """Create a category. Create a category with the provided settings.
-    name (required): The Category's name.
-    color (required): The Category's hexadecimal colour value.
-    brand_id (required): The Brand ID linked to the Category."""
-    return await _request("POST", "/calendar/categories", None, _body({"name": name, "color": color, "brand_id": brand_id}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - name (required): The Category's name (max 50 characters; cannot be empty)
+      - color (required): The Category's hexadecimal colour value
+      - brand_id (required): The Brand ID linked to the Category -> No list tool. Copy `brand_id` from an existing category or event (calendar_get_category / calendar_get_event)."""
+    body = _body({"name": name, "color": color, "brand_id": brand_id}, None, (), keep=())
+    return await _request("POST", "/calendar/categories", None, body)
 
 @tool("calendar", "POST")
-async def calendar_create_event(name: str, starts_at: str, ends_at: str, status: Literal["confirmed", "cancelled", "pending"], category_id: int, description: str | None = None, sequence_id: int | None = None, all_sites: Literal[True] | None = None, site_ids: list[int] | None = None) -> Any:
+async def calendar_create_event(
+    name: Annotated[str, Field(description="Name (name) - REQUIRED. The Event's name. (max 50 characters; cannot be empty)")],
+    starts_at: Annotated[str, Field(description="Starts at (starts_at) - REQUIRED. Date and time the Event starts. (ISO 8601 date-time; a trailing Z means UTC, e.g. 2026-11-01T10:00:00Z)")],
+    ends_at: Annotated[str, Field(description="Ends at (ends_at) - REQUIRED. Date and time the Event ends. (ISO 8601 date-time; a trailing Z means UTC, e.g. 2026-11-01T10:00:00Z)")],
+    status: Annotated[Literal["confirmed", "cancelled", "pending"], Field(description="Status (status) - REQUIRED. The current status of the Event. (one of: confirmed, cancelled, pending)")],
+    category_id: Annotated[int, Field(description="Category ID (category_id) - REQUIRED. The Event's category ID. HOW TO GET IT: Run calendar_list_categories and use the `id` of the category (match on `name`).")],
+    sequence_id: Annotated[int | None, Field(description="Sequence ID (sequence_id) - Optional. If the Event is part of a sequence, this field should contain the sequence ID from an existing Event in the sequence. HOW TO GET IT: Only for repeating events: copy `sequence_id` from another event in the same series (calendar_get_event or calendar_list_events). Leave out for a one-off event.")] = None,
+    description: Annotated[str | None, Field(description="Description (description) - Optional. The description of the Event. (cannot be empty)")] = None,
+    all_sites: Annotated[bool | None, Field(description="All sites (all_sites) - Optional. Whether the Event belongs to All Sites. Only true is accepted. Pass this OR site_ids - never both.")] = None,
+    site_ids: Annotated[list[int] | None, Field(description="Site IDs (site_ids) - Optional. List of all site IDs the Event belongs to. HOW TO GET IT: No list tool for sites. Copy `site_ids` from an existing record (e.g. calendar_get_event), or use all_sites=true for every site. Pass this OR all_sites - never both.")] = None,
+) -> Any:
     """Create an event. Create an event with the provided settings.
-    name (required): The Event's name (1-50 chars).
-    starts_at (required): Date and time the Event starts, ISO 8601, e.g. 2018-01-01T10:00:00Z.
-    ends_at (required): Date and time the Event ends, ISO 8601, e.g. 2018-01-01T11:00:00Z.
-    status (required): The current status of the Event: confirmed, cancelled or pending.
-    category_id (required): The Event's category ID.
-    description: The description of the Event.
-    sequence_id: If the Event is part of a sequence, the sequence ID from an existing Event in the sequence.
-    all_sites: Pass true if the Event belongs to All Sites. Use this OR site_ids, not both.
-    site_ids: List of all site IDs the Event belongs to. Use this OR all_sites, not both."""
-    if all_sites is not None and site_ids is not None:
-        raise ValueError("Pass either all_sites=true or site_ids, not both")
-    return await _request("POST", "/calendar/events", None, _body({"name": name, "starts_at": starts_at, "ends_at": ends_at, "status": status, "category_id": category_id, "description": description, "sequence_id": sequence_id, "all_sites": all_sites, "site_ids": site_ids}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - name (required): The Event's name (max 50 characters; cannot be empty)
+      - starts_at (required): Date and time the Event starts (ISO 8601 date-time; a trailing Z means UTC, e.g. 2026-11-01T10:00:00Z)
+      - ends_at (required): Date and time the Event ends (ISO 8601 date-time; a trailing Z means UTC, e.g. 2026-11-01T10:00:00Z)
+      - status (required): The current status of the Event (one of: confirmed, cancelled, pending)
+      - category_id (required): The Event's category ID -> Run calendar_list_categories and use the `id` of the category (match on `name`).
+      - sequence_id (optional): If the Event is part of a sequence, this field should contain the sequence ID from an existing Event in the sequence -> Only for repeating events: copy `sequence_id` from another event in the same series (calendar_get_event or calendar_list_events). Leave out for a one-off event.
+      - description (optional): The description of the Event (cannot be empty)
+      - all_sites (optional): Whether the Event belongs to All Sites
+      - site_ids (optional): List of all site IDs the Event belongs to -> No list tool for sites. Copy `site_ids` from an existing record (e.g. calendar_get_event), or use all_sites=true for every site.
+      Site rule: pass exactly one of: all_sites OR site_ids.
+    
+    VISIBILITY: the ChurchSuite API (v2.112.3) does not accept a `visibility` object on create or edit - it is read-only (you can see it with calendar_get_event). New events get the Calendar module's default visibility; change website/Embed, featured and My ChurchSuite audience inside ChurchSuite. Do not pass `visibility`."""
+    body = _body({"sequence_id": sequence_id, "name": name, "starts_at": starts_at, "ends_at": ends_at, "status": status, "description": description, "category_id": category_id, "all_sites": all_sites, "site_ids": site_ids}, None, (), keep=())
+    if all_sites is not None and all_sites is not True:
+        raise ValueError("all_sites can only be true. To limit the item to certain sites pass site_ids instead.")
+    _check_choice(body, [(['all_sites'], ['all_sites']), (['site_ids'], ['site_ids'])], True)
+    return await _request("POST", "/calendar/events", None, body)
 
 @tool("calendar", "POST")
-async def calendar_create_event_note(id: int, content: str, pinned: bool | None = None, visible_to: Any | None = None) -> Any:
+async def calendar_create_event_note(
+    id: Annotated[int, Field(description="ID (id) - REQUIRED. ID of the event to add the note to. Find it with calendar_list_events (use `q` to search).")],
+    content: Annotated[str, Field(description="Content (content) - REQUIRED. The content of the Note. (max 65535 characters; cannot be empty)")],
+    pinned: Annotated[bool | None, Field(description="Pinned (pinned) - Optional. Whether the Note should be pinned.")] = None,
+    visible_to: Annotated[dict[str, Any] | None, Field(description="Visible to (visible_to) - Optional. Object keys: ONE of these shapes: {just_me (one of true): The resource should only be visible to the current user} OR {user_group_ids (list of integer): List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to -> ChurchSuite user-group IDs. No list tool; copy them from an existing record's visible_to, or ask a ChurchSuite admin.}")] = None,
+) -> Any:
     """Create an event note. Create a Note against an Event in the Calendar module.
-    content (required): The content of the Note.
-    pinned: Whether the Note should be pinned.
-    visible_to: Object, one of these shapes: {just_me: must be true} OR {user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to."""
-    return await _request("POST", f"/calendar/events/{id}/notes", None, _body({"content": content, "pinned": pinned, "visible_to": visible_to}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - id (required): ID of the event to add the note to. Find it with calendar_list_events (use `q` to search).
+      - content (required): The content of the Note (max 65535 characters; cannot be empty)
+      - pinned (optional): Whether the Note should be pinned
+      - visible_to (optional): Visible to"""
+    body = _body({"content": content, "pinned": pinned, "visible_to": visible_to}, None, (), keep=())
+    return await _request("POST", f"/calendar/events/{id}/notes", None, body)
 
 @tool("calendar", "POST")
 async def calendar_create_signup(event_id: int, person: dict[str, Any] | None = None, first_name: str | None = None, last_name: str | None = None, ticket_id: int | None = None, email: str | None = None, mobile: str | None = None, notes: str | None = None, paid_amount: int | None = None, question_responses: list[dict[str, Any]] | None = None, send_confirmation: bool | None = None, override_capacity: bool | None = None) -> Any:
@@ -751,29 +977,72 @@ async def calendar_create_signup(event_id: int, person: dict[str, Any] | None = 
     return await _request("POST", "/calendar/signups", None, _body({"event_id": event_id, "person": person, "first_name": first_name, "last_name": last_name, "ticket_id": ticket_id, "email": email, "mobile": mobile, "notes": notes, "paid_amount": paid_amount, "question_responses": question_responses, "send_confirmation": send_confirmation, "override_capacity": override_capacity}, None, ()))
 
 @tool("calendar", "PUT")
-async def calendar_edit_category(id: int, name: str, color: str, brand_id: int) -> Any:
+async def calendar_edit_category(
+    id: Annotated[int, Field(description="ID (id) - REQUIRED. ID of the category to change. Find it with calendar_list_categories (use `q` to search) or the matching get tool.")],
+    name: Annotated[str, Field(description="Name (name) - REQUIRED. The Category's name. (max 50 characters; cannot be empty)")],
+    color: Annotated[str, Field(description="Color (color) - REQUIRED. The Category's hexadecimal colour value.")],
+    brand_id: Annotated[int, Field(description="Brand ID (brand_id) - REQUIRED. The Brand ID linked to the Category. HOW TO GET IT: No list tool. Copy `brand_id` from an existing category or event (calendar_get_category / calendar_get_event).")],
+) -> Any:
     """Update a category. Update a single category identified by ID.
-    name (required): The Category's name.
-    color (required): The Category's hexadecimal colour value.
-    brand_id (required): The Brand ID linked to the Category."""
-    return await _request("PUT", f"/calendar/categories/{id}", None, _body({"name": name, "color": color, "brand_id": brand_id}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - id (required): ID of the category to change. Find it with calendar_list_categories (use `q` to search) or the matching get tool.
+      - name (required): The Category's name (max 50 characters; cannot be empty)
+      - color (required): The Category's hexadecimal colour value
+      - brand_id (required): The Brand ID linked to the Category -> No list tool. Copy `brand_id` from an existing category or event (calendar_get_category / calendar_get_event)."""
+    body = _body({"name": name, "color": color, "brand_id": brand_id}, None, (), keep=())
+    return await _request("PUT", f"/calendar/categories/{id}", None, body)
 
 @tool("calendar", "PUT")
-async def calendar_edit_event(id: int, name: str | None = None, starts_at: str | None = None, ends_at: str | None = None, status: Literal["confirmed", "cancelled", "pending"] | None = None, description: str | None = None, category_id: int | None = None, sequence_id: int | None = None, all_sites: Literal[True] | None = None, site_ids: list[int] | None = None, set_null: list[str] | None = None) -> Any:
+async def calendar_edit_event(
+    id: Annotated[int, Field(description="ID (id) - REQUIRED. ID of the event to change. Find it with calendar_list_events (use `q` to search) or the matching get tool.")],
+    sequence_id: Annotated[int | None, Field(description="Sequence ID (sequence_id) - Optional - leave out to keep the current value. If the Event is part of a sequence, this field should contain the sequence ID from an existing Event in the sequence. HOW TO GET IT: Only for repeating events: copy `sequence_id` from another event in the same series (calendar_get_event or calendar_list_events). Leave out for a one-off event.")] = None,
+    name: Annotated[str | None, Field(description="Name (name) - Optional - leave out to keep the current value. The Event's name. (max 50 characters; cannot be empty)")] = None,
+    starts_at: Annotated[str | None, Field(description="Starts at (starts_at) - Optional - leave out to keep the current value. Date and time the Event starts. (ISO 8601 date-time; a trailing Z means UTC, e.g. 2026-11-01T10:00:00Z)")] = None,
+    ends_at: Annotated[str | None, Field(description="Ends at (ends_at) - Optional - leave out to keep the current value. Date and time the Event ends. (ISO 8601 date-time; a trailing Z means UTC, e.g. 2026-11-01T10:00:00Z)")] = None,
+    status: Annotated[Literal["confirmed", "cancelled", "pending"] | None, Field(description="Status (status) - Optional - leave out to keep the current value. The current status of the Event. (one of: confirmed, cancelled, pending)")] = None,
+    description: Annotated[str | None, Field(description="Description (description) - Optional - leave out to keep the current value. The description of the Event.")] = None,
+    category_id: Annotated[int | None, Field(description="Category ID (category_id) - Optional - leave out to keep the current value. The Event's category ID. HOW TO GET IT: Run calendar_list_categories and use the `id` of the category (match on `name`).")] = None,
+    all_sites: Annotated[bool | None, Field(description="All sites (all_sites) - Optional - leave out to keep the current value. Whether the Event belongs to All Sites. Only true is accepted. Pass this OR site_ids - never both.")] = None,
+    site_ids: Annotated[list[int] | None, Field(description="Site IDs (site_ids) - Optional - leave out to keep the current value. List of all site IDs the Event belongs to. HOW TO GET IT: No list tool for sites. Copy `site_ids` from an existing record (e.g. calendar_get_event), or use all_sites=true for every site. Pass this OR all_sites - never both.")] = None,
+    set_null: Annotated[list[Literal["sequence_id"]] | None, Field(description="Optional. Names of fields to CLEAR (set to null). Allowed: sequence_id. Leave a field out of both its own parameter and this list to keep it unchanged.")] = None,
+    fill_from_current: Annotated[bool, Field(description="Default true. Read the event first and re-send its unchanged fields, so you only have to pass what you are changing. Set false to send exactly and only the fields you pass.")] = True,
+) -> Any:
     """Update an event. Update a single event identified by ID.
-    name: The Event's name (1-50 chars).
-    starts_at: Date and time the Event starts, ISO 8601, e.g. 2018-01-01T10:00:00Z.
-    ends_at: Date and time the Event ends, ISO 8601, e.g. 2018-01-01T11:00:00Z.
-    status: The current status of the Event: confirmed, cancelled or pending.
-    description: The description of the Event.
-    category_id: The Event's category ID.
-    sequence_id: If the Event is part of a sequence, the sequence ID from an existing Event in the sequence.
-    all_sites: Pass true if the Event belongs to All Sites. Use this OR site_ids, not both.
-    site_ids: List of all site IDs the Event belongs to. Use this OR all_sites, not both.
-    set_null: names of nullable fields to clear (sequence_id)."""
-    if all_sites is not None and site_ids is not None:
-        raise ValueError("Pass either all_sites=true or site_ids, not both")
-    return await _request("PUT", f"/calendar/events/{id}", None, _body({"name": name, "starts_at": starts_at, "ends_at": ends_at, "status": status, "description": description, "category_id": category_id, "sequence_id": sequence_id, "all_sites": all_sites, "site_ids": site_ids}, set_null, ("sequence_id", )))
+    
+    WHAT YOU NEED TO PROVIDE
+      - id (required): ID of the event to change. Find it with calendar_list_events (use `q` to search) or the matching get tool.
+      - sequence_id (optional): If the Event is part of a sequence, this field should contain the sequence ID from an existing Event in the sequence -> Only for repeating events: copy `sequence_id` from another event in the same series (calendar_get_event or calendar_list_events). Leave out for a one-off event.
+      - name (optional): The Event's name (max 50 characters; cannot be empty)
+      - starts_at (optional): Date and time the Event starts (ISO 8601 date-time; a trailing Z means UTC, e.g. 2026-11-01T10:00:00Z)
+      - ends_at (optional): Date and time the Event ends (ISO 8601 date-time; a trailing Z means UTC, e.g. 2026-11-01T10:00:00Z)
+      - status (optional): The current status of the Event (one of: confirmed, cancelled, pending)
+      - description (optional): The description of the Event
+      - category_id (optional): The Event's category ID -> Run calendar_list_categories and use the `id` of the category (match on `name`).
+      - all_sites (optional): Whether the Event belongs to All Sites
+      - site_ids (optional): List of all site IDs the Event belongs to -> No list tool for sites. Copy `site_ids` from an existing record (e.g. calendar_get_event), or use all_sites=true for every site.
+      - set_null (optional): list of fields to clear: sequence_id.
+      - fill_from_current (optional): see parameter description.
+      Site rule: pass exactly one of: all_sites OR site_ids.
+    
+    VISIBILITY: the API cannot set `visibility` (embed, featured, My ChurchSuite groups); this tool never sends it, so existing visibility is left as it was. Check with calendar_get_event afterwards. By default (fill_from_current=true) the tool first reads the event and re-sends the unchanged name, dates, status, category, description, sequence_id and sites, because ChurchSuite validates a full event on every edit - so you only need to pass what you want to change."""
+    body = _body({"sequence_id": sequence_id, "name": name, "starts_at": starts_at, "ends_at": ends_at, "status": status, "description": description, "category_id": category_id, "all_sites": all_sites, "site_ids": site_ids}, set_null, ("sequence_id", ), keep=())
+    if all_sites is not None and all_sites is not True:
+        raise ValueError("all_sites can only be true. To limit the item to certain sites pass site_ids instead.")
+    _check_choice(body, [(['all_sites'], []), (['site_ids'], [])], False)
+    if fill_from_current:
+        cur = (await _request("GET", f"/calendar/events/{id}")).get("data", {})
+        for k in ("name", "starts_at", "ends_at", "status", "category_id", "description"):
+            if k not in body and cur.get(k) is not None:
+                body[k] = cur[k]
+        if "sequence_id" not in body:
+            body["sequence_id"] = cur.get("sequence_id")
+        if "all_sites" not in body and "site_ids" not in body:
+            if cur.get("all_sites"):
+                body["all_sites"] = True
+            else:
+                body["site_ids"] = cur.get("site_ids") or []
+    return await _request("PUT", f"/calendar/events/{id}", None, body)
 
 @tool("calendar", "PUT")
 async def calendar_edit_signup(id: int, email: str, mobile: str, notes: str, question_responses: list[dict[str, Any]], ticket_id: int | None = None, paid_amount: int | None = None, person: dict[str, Any] | None = None, first_name: str | None = None, last_name: str | None = None) -> Any:
@@ -810,23 +1079,42 @@ async def calendar_delete_signup(id: int) -> Any:
     return await _request("DELETE", f"/calendar/signups/{id}", None)
 
 @tool("calendar", "POST")
-async def calendar_create_label(name: str, colour: Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"], options: list[str], multiple_responses: bool, required: bool) -> Any:
+async def calendar_create_label(
+    name: Annotated[str, Field(description="Name (name) - REQUIRED. The Label's name. (max 50 characters; cannot be empty)")],
+    colour: Annotated[Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"], Field(description="Colour (colour) - REQUIRED. The Label's colour. (one of: blue, red, orange, green, purple, pink, brown, grey)")],
+    options: Annotated[list[str], Field(description="Options (options) - REQUIRED. List of options that belong to the Label.")],
+    multiple_responses: Annotated[bool, Field(description="Multiple responses (multiple_responses) - REQUIRED. Whether the Label can have multiple responses.")],
+    required: Annotated[bool, Field(description="Required (required) - REQUIRED. Whether the Label is required.")],
+) -> Any:
     """Create a label. Create a label with the provided settings.
-    name (required): The Label's name (1-50 chars).
-    colour (required): The Label's colour.
-    options (required): List of options that belong to the Label (each 1-50 chars).
-    multiple_responses (required): Whether the Label can have multiple responses.
-    required (required): Whether the Label is required."""
-    return await _request("POST", "/calendar/labels", None, _body({"name": name, "colour": colour, "options": options, "multiple_responses": multiple_responses, "required": required}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - name (required): The Label's name (max 50 characters; cannot be empty)
+      - colour (required): The Label's colour (one of: blue, red, orange, green, purple, pink, brown, grey)
+      - options (required): List of options that belong to the Label
+      - multiple_responses (required): Whether the Label can have multiple responses
+      - required (required): Whether the Label is required"""
+    body = _body({"name": name, "colour": colour, "options": options, "multiple_responses": multiple_responses, "required": required}, None, (), keep=())
+    return await _request("POST", "/calendar/labels", None, body)
 
 @tool("calendar", "PUT")
-async def calendar_edit_label(id: int, name: str | None = None, colour: Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"] | None = None, multiple_responses: bool | None = None, required: bool | None = None) -> Any:
-    """Update a label. Update a single label identified by ID. (Options cannot be changed through this endpoint.)
-    name: The Label's name (1-50 chars).
-    colour: The Label's colour.
-    multiple_responses: Whether the Label can have multiple responses.
-    required: Whether the Label is required."""
-    return await _request("PUT", f"/calendar/labels/{id}", None, _body({"name": name, "colour": colour, "multiple_responses": multiple_responses, "required": required}, None, ()))
+async def calendar_edit_label(
+    id: Annotated[int, Field(description="ID (id) - REQUIRED. ID of the label to change. Find it with calendar_list_labels (use `q` to search) or the matching get tool.")],
+    name: Annotated[str | None, Field(description="Name (name) - Optional - leave out to keep the current value. The Label's name. (max 50 characters; cannot be empty)")] = None,
+    colour: Annotated[Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"] | None, Field(description="Colour (colour) - Optional - leave out to keep the current value. The Label's colour. (one of: blue, red, orange, green, purple, pink, brown, grey)")] = None,
+    multiple_responses: Annotated[bool | None, Field(description="Multiple responses (multiple_responses) - Optional - leave out to keep the current value. Whether the Label can have multiple responses.")] = None,
+    required: Annotated[bool | None, Field(description="Required (required) - Optional - leave out to keep the current value. Whether the Label is required.")] = None,
+) -> Any:
+    """Update a label. Update a single label identified by ID.
+    
+    WHAT YOU NEED TO PROVIDE
+      - id (required): ID of the label to change. Find it with calendar_list_labels (use `q` to search) or the matching get tool.
+      - name (optional): The Label's name (max 50 characters; cannot be empty)
+      - colour (optional): The Label's colour (one of: blue, red, orange, green, purple, pink, brown, grey)
+      - multiple_responses (optional): Whether the Label can have multiple responses
+      - required (optional): Whether the Label is required"""
+    body = _body({"name": name, "colour": colour, "multiple_responses": multiple_responses, "required": required}, None, (), keep=())
+    return await _request("PUT", f"/calendar/labels/{id}", None, body)
 
 @tool("calendar", "DELETE")
 async def calendar_delete_label(id: int) -> Any:
@@ -1025,169 +1313,334 @@ async def children_list_tags(page: int | None = None, per_page: int | None = Non
     return await _request("GET", "/children/tags", {"page": page, "per_page": per_page, "q": q, "order_by": order_by})
 
 @tool("children", "POST")
-async def children_create_child(first_name: str, last_name: str, all_sites: bool, site_ids: list[int], middle_name: str | None = None, formal_name: str | None = None, sex: Literal["female", "male"] | None = None, date_of_birth: str | None = None, mobile: str | None = None, email: str | None = None, address: dict[str, Any] | None = None, custom_fields: list[Any] | None = None, communication: dict[str, Any] | None = None, school: str | None = None, school_year_offset: int | None = None, medical_short: str | None = None, medical: str | None = None, doctor_details: str | None = None, additional_needs: str | None = None, additional_info: str | None = None, login: dict[str, Any] | None = None, privacy: dict[str, Any] | None = None) -> Any:
+async def children_create_child(
+    first_name: Annotated[str, Field(description="First name (first_name) - REQUIRED. The first name of the Child. (max 50 characters; cannot be empty)")],
+    last_name: Annotated[str, Field(description="Last name (last_name) - REQUIRED. The last name of the Child. (max 50 characters; cannot be empty)")],
+    all_sites: Annotated[bool, Field(description="All sites (all_sites) - REQUIRED. Whether the Child belongs to All Sites.")],
+    site_ids: Annotated[list[int], Field(description="Site IDs (site_ids) - REQUIRED. An array of Site IDs that the Child belongs to. If `all_sites` is `true`, this will be overridden. You are only able to add site IDs for sites you have the relevant permission for. HOW TO GET IT: No list tool for sites. Copy `site_ids` from an existing record (e.g. children_get_child), or use all_sites=true for every site.")],
+    middle_name: Annotated[str | None, Field(description="Middle name (middle_name) - Optional. The middle name of the Child. (max 50 characters; cannot be empty)")] = None,
+    formal_name: Annotated[str | None, Field(description="Formal name (formal_name) - Optional. The formal name of the Child. (max 50 characters; cannot be empty)")] = None,
+    sex: Annotated[Literal["female", "male"] | None, Field(description="Sex (sex) - Optional. The sex of the Child. (one of: female, male)")] = None,
+    date_of_birth: Annotated[str | None, Field(description="Date of birth (date_of_birth) - Optional. The Child's date of birth. (date as YYYY-MM-DD)")] = None,
+    mobile: Annotated[str | None, Field(description="Mobile (mobile) - Optional. The Child's mobile number. (max 20 characters; cannot be empty)")] = None,
+    email: Annotated[str | None, Field(description="Email (email) - Optional. The Child's email address. (max 100 characters; an email address)")] = None,
+    address: Annotated[dict[str, Any] | None, Field(description="Address (address) - Optional. A street Address. Object keys: {line_1 (string): The first line of the Address; line_2 (string): The second line of the Address; line_3 (string): The third line of the Address; city (string): The city of the Address; county (string): The county of the Address; country (string): The country of the Address, in ISO3166 alpha 2 format; postcode (string): The postcode of the Address}")] = None,
+    custom_fields: Annotated[list[dict[str, Any]] | None, Field(description="Custom fields (custom_fields) - Optional. Custom Field responses for this resource. HOW TO GET IT: Use children_list_custom_fields to find each field's `id` and type. Object keys: list of ONE of these shapes: {id (integer, required): The ID of the Custom Field; field_type (one of text/textarea/phone/date, required): A discriminator to determine the type of Custom Field this response belongs to; value (string, required): The raw value of a text, textarea, phone or date} OR {id (integer, required): The ID of the Custom Field; field_type (one of email, required): A discriminator to determine the type of Custom Field this response belongs to; value (string, required): The raw value of an email} OR {id (integer, required): The ID of the Custom Field; field_type (one of radio/select, required): A discriminator to determine the type of Custom Field this response belongs to; value ({id (string, required)}, required): The UUID of the selected response for a radio or select field} OR {id (integer, required): The ID of the Custom Field; field_type (one of checkbox, required): A discriminator to determine the type of Custom Field this response belongs to; value (list of {id (string, required)}, required): A list of UUIDs of the selected responses for a checkbox field}")] = None,
+    communication: Annotated[dict[str, Any] | None, Field(description="Communication (communication) - Optional. The person's communication preferences. If no data is provided, the module default communication preferences will be used. Object keys: {general_email (boolean, required): Whether this person has consented to receiving general emails; general_sms (boolean, required): Whether this person has consented to receiving general SMS messages; phone (boolean, required): Whether this person has consented to receiving phone calls; post (boolean, required): Whether this person has consented to receiving post; rota_email (boolean, required): Whether this person has consented to receiving rota emails; rota_sms (boolean, required): Whether this person has consented to receiving rota SMS messages}")] = None,
+    school: Annotated[str | None, Field(description="School (school) - Optional. The Child's school. (max 50 characters; cannot be empty)")] = None,
+    school_year_offset: Annotated[int | None, Field(description="School year offset (school_year_offset) - Optional. Adjusted school year value based on the Child's age.")] = None,
+    medical_short: Annotated[str | None, Field(description="Medical short (medical_short) - Optional. Condensed medical information about the Child. (max 100 characters; cannot be empty)")] = None,
+    medical: Annotated[str | None, Field(description="Medical (medical) - Optional. Full medical information about the Child. (max 65535 characters; cannot be empty)")] = None,
+    doctor_details: Annotated[str | None, Field(description="Doctor details (doctor_details) - Optional. Child's doctors details. (max 65535 characters; cannot be empty)")] = None,
+    additional_needs: Annotated[str | None, Field(description="Additional needs (additional_needs) - Optional. Any additional needs declared about the Child. (max 65535 characters; cannot be empty)")] = None,
+    additional_info: Annotated[str | None, Field(description="Additional info (additional_info) - Optional. Additional information about the Child. (max 250 characters; cannot be empty)")] = None,
+    login: Annotated[dict[str, Any] | None, Field(description="Login (login) - Optional. My ChurchSuite/CharitySuite login information. Object keys: {enabled (boolean, required): Whether the person is able to log into My; invited (boolean, required): Whether the person has been invited to create a My account}")] = None,
+    privacy: Annotated[dict[str, Any] | None, Field(description="Privacy (privacy) - Optional. The Child's privacy settings. If no data is provided, the default privacy settings will be used. Object keys: {name_visible (boolean, required): Whether the Child's name is visible in My; address_visible (boolean, required): Whether the Child's address is visible in My. This will only be respected if name_visible is true, else it will not be visible; mobile_visible (boolean, required): Whether the Child's mobile is visible in My. This will only be respected if name_visible is true, else it will not be visible; email_visible (boolean, required): Whether the Child's email is visible in My. This will only be respected if name_visible is true, else it will not be visible}")] = None,
+) -> Any:
     """Create a child. Create a child with the provided settings.
-    first_name (required): The first name of the Child.
-    last_name (required): The last name of the Child.
-    all_sites (required): Whether the Child belongs to All Sites.
-    site_ids (required): An array of Site IDs that the Child belongs to. If `all_sites` is `true`, this will be overridden. You are only able to add site IDs for sites you have the relevant permission for.
-    middle_name: The middle name of the Child.
-    formal_name: The formal name of the Child.
-    sex: The sex of the Child.
-    date_of_birth: The Child's date of birth.
-    mobile: The Child's mobile number.
-    email: The Child's email address.
-    address: A street Address. Object keys: line_1 (string): The first line of the Address; line_2 (string): The second line of the Address; line_3 (string): The third line of the Address; city (string): The city of the Address; county (string): The county of the Address; country (string): The country of the Address, in ISO3166 alpha 2 format; postcode (string): The postcode of the Address.
-    custom_fields: Custom Field responses for this resource
-    communication: The person's communication preferences. If no data is provided, the module default communication preferences will be used. Object keys: general_email (boolean, required): Whether this person has consented to receiving general emails; general_sms (boolean, required): Whether this person has consented to receiving general SMS messages; phone (boolean, required): Whether this person has consented to receiving phone calls; post (boolean, required): Whether this person has consented to receiving post; rota_email (boolean, required): Whether this person has consented to receiving rota emails; rota_sms (boolean, required): Whether this person has consented to receiving rota SMS messages.
-    school: The Child's school.
-    school_year_offset: Adjusted school year value based on the Child's age.
-    medical_short: Condensed medical information about the Child.
-    medical: Full medical information about the Child.
-    doctor_details: Child's doctors details.
-    additional_needs: Any additional needs declared about the Child.
-    additional_info: Additional information about the Child.
-    login: My ChurchSuite/CharitySuite login information. Keys: enabled, invited.
-    privacy: The Child's privacy settings. If no data is provided, the default privacy settings will be used. Object keys: name_visible (boolean, required): Whether the Child's name is visible in My; address_visible (boolean, required): Whether the Child's address is visible in My. This will only be respected if name_visible is true, else it will not be visible; mobile_visible (boolean, required): Whether the Child's mobile is visible in My. This will only be respected if name_visible is true, else it will not be visible; email_visible (boolean, required): Whether the Child's email is visible in My. This will only be respected if name_visible is true, else it will not be visible."""
-    return await _request("POST", "/children/children", None, _body({"first_name": first_name, "last_name": last_name, "all_sites": all_sites, "site_ids": site_ids, "middle_name": middle_name, "formal_name": formal_name, "sex": sex, "date_of_birth": date_of_birth, "mobile": mobile, "email": email, "address": address, "custom_fields": custom_fields, "communication": communication, "school": school, "school_year_offset": school_year_offset, "medical_short": medical_short, "medical": medical, "doctor_details": doctor_details, "additional_needs": additional_needs, "additional_info": additional_info, "login": login, "privacy": privacy}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - first_name (required): The first name of the Child (max 50 characters; cannot be empty)
+      - last_name (required): The last name of the Child (max 50 characters; cannot be empty)
+      - all_sites (required): Whether the Child belongs to All Sites
+      - site_ids (required): An array of Site IDs that the Child belongs to. If `all_sites` is `true`, this will be overridden. You are only able to add site IDs for sites you have the relevant permission for -> No list tool for sites. Copy `site_ids` from an existing record (e.g. children_get_child), or use all_sites=true for every site.
+      - middle_name (optional): The middle name of the Child (max 50 characters; cannot be empty)
+      - formal_name (optional): The formal name of the Child (max 50 characters; cannot be empty)
+      - sex (optional): The sex of the Child (one of: female, male)
+      - date_of_birth (optional): The Child's date of birth (date as YYYY-MM-DD)
+      - mobile (optional): The Child's mobile number (max 20 characters; cannot be empty)
+      - email (optional): The Child's email address (max 100 characters; an email address)
+      - address (optional): A street Address
+      - custom_fields (optional): Custom Field responses for this resource -> Use children_list_custom_fields to find each field's `id` and type.
+      - communication (optional): The person's communication preferences. If no data is provided, the module default communication preferences will be used
+      - school (optional): The Child's school (max 50 characters; cannot be empty)
+      - school_year_offset (optional): Adjusted school year value based on the Child's age
+      - medical_short (optional): Condensed medical information about the Child (max 100 characters; cannot be empty)
+      - medical (optional): Full medical information about the Child (max 65535 characters; cannot be empty)
+      - doctor_details (optional): Child's doctors details (max 65535 characters; cannot be empty)
+      - additional_needs (optional): Any additional needs declared about the Child (max 65535 characters; cannot be empty)
+      - additional_info (optional): Additional information about the Child (max 250 characters; cannot be empty)
+      - login (optional): My ChurchSuite/CharitySuite login information
+      - privacy (optional): The Child's privacy settings. If no data is provided, the default privacy settings will be used"""
+    body = _body({"first_name": first_name, "middle_name": middle_name, "last_name": last_name, "formal_name": formal_name, "sex": sex, "date_of_birth": date_of_birth, "mobile": mobile, "email": email, "address": address, "custom_fields": custom_fields, "communication": communication, "school": school, "school_year_offset": school_year_offset, "medical_short": medical_short, "medical": medical, "doctor_details": doctor_details, "additional_needs": additional_needs, "additional_info": additional_info, "login": login, "privacy": privacy, "all_sites": all_sites, "site_ids": site_ids}, None, (), keep=())
+    return await _request("POST", "/children/children", None, body)
 
 @tool("children", "POST")
-async def children_create_child_note(id: int, content: str, pinned: bool | None = None, visible_to: Any | None = None) -> Any:
+async def children_create_child_note(
+    id: Annotated[int, Field(description="ID (id) - REQUIRED. ID of the child to add the note to. Find it with children_list_children (use `q` to search).")],
+    content: Annotated[str, Field(description="Content (content) - REQUIRED. The content of the Note. (max 65535 characters; cannot be empty)")],
+    pinned: Annotated[bool | None, Field(description="Pinned (pinned) - Optional. Whether the Note should be pinned.")] = None,
+    visible_to: Annotated[dict[str, Any] | None, Field(description="Visible to (visible_to) - Optional. Object keys: ONE of these shapes: {just_me (one of true): The resource should only be visible to the current user} OR {user_group_ids (list of integer): List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to -> ChurchSuite user-group IDs. No list tool; copy them from an existing record's visible_to, or ask a ChurchSuite admin.}")] = None,
+) -> Any:
     """Create a child note. Create a Note against a Child in the Children module.
-    content (required): The content of the Note.
-    pinned: Whether the Note should be pinned.
-    visible_to: Object, one of these shapes: {just_me: must be true} OR {user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to."""
-    return await _request("POST", f"/children/children/{id}/notes", None, _body({"content": content, "pinned": pinned, "visible_to": visible_to}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - id (required): ID of the child to add the note to. Find it with children_list_children (use `q` to search).
+      - content (required): The content of the Note (max 65535 characters; cannot be empty)
+      - pinned (optional): Whether the Note should be pinned
+      - visible_to (optional): Visible to"""
+    body = _body({"content": content, "pinned": pinned, "visible_to": visible_to}, None, (), keep=())
+    return await _request("POST", f"/children/children/{id}/notes", None, body)
 
 @tool("children", "POST")
-async def children_create_flow_stage(flow_id: int, name: str, due_interval: int, due_period: Literal["days", "weeks", "months"], due_from: Literal["first_added", "previous_stage"], instructions: str | None = None, assigned_user_id: int | None = None, automate_time: str | None = None) -> Any:
+async def children_create_flow_stage(
+    flow_id: Annotated[int, Field(description="Flow ID (flow_id) - REQUIRED. The Flow ID the Stage belongs to. HOW TO GET IT: Run children_list_flows and use the flow `id`.")],
+    name: Annotated[str, Field(description="Name (name) - REQUIRED. The Stage's name. (max 50 characters; cannot be empty)")],
+    due_interval: Annotated[int, Field(description="Due interval (due_interval) - REQUIRED. The number of days, weeks or months used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage.")],
+    due_period: Annotated[Literal["days", "weeks", "months"], Field(description="Due period (due_period) - REQUIRED. The due period used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage. (one of: days, weeks, months)")],
+    due_from: Annotated[Literal["first_added", "previous_stage"], Field(description="Due from (due_from) - REQUIRED. The relative point used for tracking a person linked to the Stage, either when they are first added to the flow or when they are processed from a previous stage. (one of: first_added, previous_stage)")],
+    instructions: Annotated[str | None, Field(description="Instructions (instructions) - Optional. The instructions for the Stage. (max 65535 characters)")] = None,
+    assigned_user_id: Annotated[int | None, Field(description="Assigned user ID (assigned_user_id) - Optional. The ID of the user automatically assigned to people in this stage, or null if no user is assigned. HOW TO GET IT: A ChurchSuite user ID. No list tool; it appears as `assigned_user_id` on existing flow stages/trackings.")] = None,
+    automate_time: Annotated[str | None, Field(description="Automate time (automate_time) - Optional. The UTC time the Stage will automatically process any due or overdue people if it is automated, or null if it is not automated.")] = None,
+) -> Any:
     """Create a flow stage. Create a stage for a flow.
-    flow_id (required): The Flow ID the Stage belongs to.
-    name (required): The Stage's name.
-    due_interval (required): The number of days, weeks or months used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage.
-    due_period (required): The due period used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage.
-    due_from (required): The relative point used for tracking a person linked to the Stage, either when they are first added to the flow or when they are processed from a previous stage.
-    instructions: The instructions for the Stage.
-    assigned_user_id: The ID of the user automatically assigned to people in this stage, or null if no user is assigned.
-    automate_time: The UTC time the Stage will automatically process any due or overdue people if it is automated, or null if it is not automated."""
-    return await _request("POST", "/children/flow_stages", None, _body({"flow_id": flow_id, "name": name, "due_interval": due_interval, "due_period": due_period, "due_from": due_from, "instructions": instructions, "assigned_user_id": assigned_user_id, "automate_time": automate_time}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - flow_id (required): The Flow ID the Stage belongs to -> Run children_list_flows and use the flow `id`.
+      - name (required): The Stage's name (max 50 characters; cannot be empty)
+      - due_interval (required): The number of days, weeks or months used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage
+      - due_period (required): The due period used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage (one of: days, weeks, months)
+      - due_from (required): The relative point used for tracking a person linked to the Stage, either when they are first added to the flow or when they are processed from a previous stage (one of: first_added, previous_stage)
+      - instructions (optional): The instructions for the Stage (max 65535 characters)
+      - assigned_user_id (optional): The ID of the user automatically assigned to people in this stage, or null if no user is assigned -> A ChurchSuite user ID. No list tool; it appears as `assigned_user_id` on existing flow stages/trackings.
+      - automate_time (optional): The UTC time the Stage will automatically process any due or overdue people if it is automated, or null if it is not automated"""
+    body = _body({"flow_id": flow_id, "name": name, "instructions": instructions, "due_interval": due_interval, "due_period": due_period, "due_from": due_from, "assigned_user_id": assigned_user_id, "automate_time": automate_time}, None, (), keep=())
+    return await _request("POST", "/children/flow_stages", None, body)
 
 @tool("children", "POST")
-async def children_create_flow_tracking(flow_id: int, stage_id: int, person: dict[str, Any]) -> Any:
-    """Create a flow tracking. Create a flow tracking, linked to a person's process through a flow, with the provided settings.
-    flow_id (required): The Flow ID the Tracking is linked to.
-    stage_id (required): The Stage ID the Tracking is linked to.
-    person (required): The Tracking's Person details. Keys: type, id."""
-    return await _request("POST", "/children/flow_trackings", None, _body({"flow_id": flow_id, "stage_id": stage_id, "person": person}, None, ()))
+async def children_create_flow_tracking(
+    flow_id: Annotated[int, Field(description="Flow ID (flow_id) - REQUIRED. The Flow ID the Tracking is linked to. HOW TO GET IT: Run children_list_flows and use the flow `id`.")],
+    stage_id: Annotated[int, Field(description="Stage ID (stage_id) - REQUIRED. The Stage ID the Tracking is linked to. HOW TO GET IT: Run children_list_flow_stages (filter flow_ids) and use the stage `id`.")],
+    person: Annotated[dict[str, Any], Field(description="Person (person) - REQUIRED. The Tracking's Person details. Object keys: {type (string, required): The Person's type, indicating whether they are a Child, Contact, Customer or Giver -> For a child use 'children_child'.; id (integer, required): The Person's ID -> Child ID: run children_list_children (search with `q`) and use the `id`.}")],
+) -> Any:
+    """Create a flow tracking. Create a flow tracking, linked to a person's progress through a flow, with the provided settings.
+    
+    WHAT YOU NEED TO PROVIDE
+      - flow_id (required): The Flow ID the Tracking is linked to -> Run children_list_flows and use the flow `id`.
+      - stage_id (required): The Stage ID the Tracking is linked to -> Run children_list_flow_stages (filter flow_ids) and use the stage `id`.
+      - person (required): The Tracking's Person details"""
+    body = _body({"flow_id": flow_id, "stage_id": stage_id, "person": person}, None, (), keep=())
+    return await _request("POST", "/children/flow_trackings", None, body)
 
 @tool("children", "POST")
-async def children_create_key_date(name: str, colour: Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"], visible_to: Any | None = None) -> Any:
+async def children_create_key_date(
+    name: Annotated[str, Field(description="Name (name) - REQUIRED. The Key Date's name. (max 50 characters; cannot be empty)")],
+    colour: Annotated[Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"], Field(description="Colour (colour) - REQUIRED. The Key Date's colour. (one of: blue, red, orange, green, purple, pink, brown, grey)")],
+    visible_to: Annotated[dict[str, Any] | None, Field(description="Visible to (visible_to) - Optional. Object keys: ONE of these shapes: {just_me (one of true): The resource should only be visible to the current user} OR {user_group_ids (list of integer): List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to -> ChurchSuite user-group IDs. No list tool; copy them from an existing record's visible_to, or ask a ChurchSuite admin.}")] = None,
+) -> Any:
     """Create a key date. Create a key date with the provided settings.
-    name (required): The Key Date's name.
-    colour (required): The Key Date's colour.
-    visible_to: Object, one of these shapes: {just_me: must be true} OR {user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to."""
-    return await _request("POST", "/children/key_dates", None, _body({"name": name, "colour": colour, "visible_to": visible_to}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - name (required): The Key Date's name (max 50 characters; cannot be empty)
+      - colour (required): The Key Date's colour (one of: blue, red, orange, green, purple, pink, brown, grey)
+      - visible_to (optional): Visible to"""
+    body = _body({"name": name, "colour": colour, "visible_to": visible_to}, None, (), keep=())
+    return await _request("POST", "/children/key_dates", None, body)
 
 @tool("children", "POST")
-async def children_create_key_date_resource(key_date_id: int, resource: dict[str, Any], date: str, description: str | None = None) -> Any:
+async def children_create_key_date_resource(
+    key_date_id: Annotated[int, Field(description="Key date ID (key_date_id) - REQUIRED. The Key Date's ID. HOW TO GET IT: Run children_list_key_dates and use the key date `id`.")],
+    resource: Annotated[dict[str, Any], Field(description="Resource (resource) - REQUIRED. The resource to link to the Key Date. Object keys: {id (integer, required): The ID of the resource -> Child ID: children_list_children.}")],
+    date: Annotated[str, Field(description="Date (date) - REQUIRED. The date of the Key Date Resource. (date as YYYY-MM-DD)")],
+    description: Annotated[str | None, Field(description="Description (description) - Optional. The description of this Key Date Resource. (max 65535 characters)")] = None,
+) -> Any:
     """Create a key date resource. Create a key date resource adding a child to a key date
-    key_date_id (required): The Key Date's ID.
-    resource (required): The resource to link to the Key Date. Keys: id.
-    date (required): The date of the Key Date Resource.
-    description: The description of this Key Date Resource."""
-    return await _request("POST", "/children/key_date_resources", None, _body({"key_date_id": key_date_id, "resource": resource, "date": date, "description": description}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - key_date_id (required): The Key Date's ID -> Run children_list_key_dates and use the key date `id`.
+      - resource (required): The resource to link to the Key Date
+      - date (required): The date of the Key Date Resource (date as YYYY-MM-DD)
+      - description (optional): The description of this Key Date Resource (max 65535 characters)"""
+    body = _body({"key_date_id": key_date_id, "resource": resource, "date": date, "description": description}, None, (), keep=())
+    return await _request("POST", "/children/key_date_resources", None, body)
 
 @tool("children", "POST")
-async def children_create_tag(name: str, is_smart: bool, category_id: int | None = None, description: str | None = None, colour: Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"] | None = None, visible_to: Any | None = None, pinned_icon: Literal["tick", "cross", "archive", "warning", "flag", "magic", "star", "profile", "user", "couple", "group", "pledge", "education", "job", "gift", "role", "duration", "smiley-happy", "smiley-neutral", "smiley-sad"] | None = None) -> Any:
-    """Create a tag
-    name (required): The Tag's name.
-    is_smart (required): Whether the Tag is smart or fixed.
-    category_id: The Tag's Category ID. This sets the default colour of the Tag to the Category's colour.
-    description: The description of the Tag.
-    colour: The name of the colour of the Tag. If not specified, the Category colour will be used where applicable, falling back to 'blue'.
-    visible_to: Object, one of these shapes: {just_me: must be true} OR {user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to.
-    pinned_icon: Pin this Tag by specifying an icon. Pinned tags give you a quick way to see your most important tags at a glance; they're displayed at the top of the page when viewing a person's profile."""
-    return await _request("POST", "/children/tags", None, _body({"name": name, "is_smart": is_smart, "category_id": category_id, "description": description, "colour": colour, "visible_to": visible_to, "pinned_icon": pinned_icon}, None, ()))
+async def children_create_tag(
+    name: Annotated[str, Field(description="Name (name) - REQUIRED. The Tag's name. (max 50 characters; cannot be empty)")],
+    is_smart: Annotated[bool, Field(description="Is smart (is_smart) - REQUIRED. Whether the Tag is smart or fixed.")],
+    category_id: Annotated[int | None, Field(description="Category ID (category_id) - Optional. The Tag's Category ID. This sets the default colour of the Tag to the Category's colour. HOW TO GET IT: Run children_list_tag_categories and use the `id` of the category.")] = None,
+    description: Annotated[str | None, Field(description="Description (description) - Optional. The description of the Tag. (max 65535 characters)")] = None,
+    colour: Annotated[Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"] | None, Field(description="Colour (colour) - Optional. The name of the colour of the Tag. If not specified, the Category colour will be used where applicable, falling back to 'blue'. (one of: blue, red, orange, green, purple, pink, brown, grey)")] = None,
+    visible_to: Annotated[dict[str, Any] | None, Field(description="Visible to (visible_to) - Optional. Object keys: ONE of these shapes: {just_me (one of true): The resource should only be visible to the current user} OR {user_group_ids (list of integer): List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to -> ChurchSuite user-group IDs. No list tool; copy them from an existing record's visible_to, or ask a ChurchSuite admin.}")] = None,
+    pinned_icon: Annotated[Literal["tick", "cross", "archive", "warning", "flag", "magic", "star", "profile", "user", "couple", "group", "pledge", "education", "job", "gift", "role", "duration", "smiley-happy", "smiley-neutral", "smiley-sad"] | None, Field(description="Pinned icon (pinned_icon) - Optional. Pin this Tag by specifying an icon. Pinned tags give you a quick way to see your most important tags at a glance; they're displayed at the top of the page when viewing a person's profile. (one of: tick, cross, archive, warning, flag, magic, star, profile, user, couple, group, pledge, education, job, gift, role, duration, smiley-happy, smiley-neutral, smiley-sad)")] = None,
+) -> Any:
+    """Create a tag.
+    
+    WHAT YOU NEED TO PROVIDE
+      - name (required): The Tag's name (max 50 characters; cannot be empty)
+      - is_smart (required): Whether the Tag is smart or fixed
+      - category_id (optional): The Tag's Category ID. This sets the default colour of the Tag to the Category's colour -> Run children_list_tag_categories and use the `id` of the category.
+      - description (optional): The description of the Tag (max 65535 characters)
+      - colour (optional): The name of the colour of the Tag. If not specified, the Category colour will be used where applicable, falling back to 'blue' (one of: blue, red, orange, green, purple, pink, brown, grey)
+      - visible_to (optional): Visible to
+      - pinned_icon (optional): Pin this Tag by specifying an icon. Pinned tags give you a quick way to see your most important tags at a glance; they're displayed at the top of the page when viewing a person's profile (one of: tick, cross, archive, warning, flag, magic, star, profile, user, couple, group, pledge, education, job, gift, role, duration, smiley-happy, smiley-neutral, smiley-sad)"""
+    body = _body({"name": name, "category_id": category_id, "description": description, "colour": colour, "is_smart": is_smart, "visible_to": visible_to, "pinned_icon": pinned_icon}, None, (), keep=())
+    return await _request("POST", "/children/tags", None, body)
 
 @tool("children", "POST")
-async def children_create_tag_resource(person: dict[str, Any], tag_id: int) -> Any:
+async def children_create_tag_resource(
+    person: Annotated[dict[str, Any], Field(description="Person (person) - REQUIRED. The Person to link to the Tag. Object keys: {type (one of children_child, required): The Person's type, indicating whether they are a Child, Contact, Customer or Giver -> For a child use 'children_child'.; id (integer, required): The Person's ID -> Child ID: run children_list_children (search with `q`) and use the `id`.}")],
+    tag_id: Annotated[int, Field(description="Tag ID (tag_id) - REQUIRED. The Tag's ID. HOW TO GET IT: Run children_list_tags and use the tag `id`.")],
+) -> Any:
     """Create a tag resource. Create a tag resource linking a child to a tag
-    person (required): The Person to link to the Tag. Keys: type, id.
-    tag_id (required): The Tag's ID."""
-    return await _request("POST", "/children/tag_resources", None, _body({"person": person, "tag_id": tag_id}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - person (required): The Person to link to the Tag
+      - tag_id (required): The Tag's ID -> Run children_list_tags and use the tag `id`."""
+    body = _body({"person": person, "tag_id": tag_id}, None, (), keep=())
+    return await _request("POST", "/children/tag_resources", None, body)
 
 @tool("children", "PUT")
-async def children_edit_child(id: int, first_name: str | None = None, middle_name: str | None = None, last_name: str | None = None, formal_name: str | None = None, sex: Literal["female", "male"] | None = None, date_of_birth: str | None = None, mobile: str | None = None, email: str | None = None, address: dict[str, Any] | None = None, custom_fields: list[Any] | None = None, communication: dict[str, Any] | None = None, school: str | None = None, school_year_offset: int | None = None, medical_short: str | None = None, medical: str | None = None, doctor_details: str | None = None, additional_needs: str | None = None, additional_info: str | None = None, login: dict[str, Any] | None = None, privacy: dict[str, Any] | None = None, all_sites: bool | None = None, site_ids: list[int] | None = None, set_null: list[str] | None = None) -> Any:
+async def children_edit_child(
+    id: Annotated[int, Field(description="ID (id) - REQUIRED. ID of the child to change. Find it with children_list_children (use `q` to search) or the matching get tool.")],
+    first_name: Annotated[str | None, Field(description="First name (first_name) - Optional - leave out to keep the current value. The first name of the Child. (max 50 characters; cannot be empty)")] = None,
+    middle_name: Annotated[str | None, Field(description="Middle name (middle_name) - Optional - leave out to keep the current value. The middle name of the Child. (max 50 characters)")] = None,
+    last_name: Annotated[str | None, Field(description="Last name (last_name) - Optional - leave out to keep the current value. The last name of the Child. (max 50 characters; cannot be empty)")] = None,
+    formal_name: Annotated[str | None, Field(description="Formal name (formal_name) - Optional - leave out to keep the current value. The formal name of the Child. (max 50 characters)")] = None,
+    sex: Annotated[Literal["female", "male"] | None, Field(description="Sex (sex) - Optional - leave out to keep the current value. The sex of the Child. (one of: female, male)")] = None,
+    date_of_birth: Annotated[str | None, Field(description="Date of birth (date_of_birth) - Optional - leave out to keep the current value. The Child's date of birth. (date as YYYY-MM-DD)")] = None,
+    mobile: Annotated[str | None, Field(description="Mobile (mobile) - Optional - leave out to keep the current value. The Child's mobile number. (max 20 characters)")] = None,
+    email: Annotated[str | None, Field(description="Email (email) - Optional - leave out to keep the current value. The Child's email address. (max 100 characters; an email address)")] = None,
+    address: Annotated[dict[str, Any] | None, Field(description="Address (address) - Optional - leave out to keep the current value. Edit a street Address. Object keys: {line_1 (string, required): The first line of the Address; line_2 (string, required): The second line of the Address; line_3 (string, required): The third line of the Address; city (string, required): The city of the Address; county (string, required): The county of the Address; country (string, required): The country of the Address, in ISO3166 alpha 2 format; postcode (string, required): The postcode of the Address}")] = None,
+    custom_fields: Annotated[list[dict[str, Any]] | None, Field(description="Custom fields (custom_fields) - Optional - leave out to keep the current value. Custom Field responses for this resource. HOW TO GET IT: Use children_list_custom_fields to find each field's `id` and type. Object keys: list of ONE of these shapes: {id (integer, required): The ID of the Custom Field; field_type (one of text/textarea/phone/date, required): A discriminator to determine the type of Custom Field this response belongs to; value (string, required): The raw value of a text, textarea, phone or date} OR {id (integer, required): The ID of the Custom Field; field_type (one of email, required): A discriminator to determine the type of Custom Field this response belongs to; value (string, required): The raw value of an email} OR {id (integer, required): The ID of the Custom Field; field_type (one of radio/select, required): A discriminator to determine the type of Custom Field this response belongs to; value ({id (string, required)}, required): The UUID of the selected response for a radio or select field} OR {id (integer, required): The ID of the Custom Field; field_type (one of checkbox, required): A discriminator to determine the type of Custom Field this response belongs to; value (list of {id (string, required)}, required): A list of UUIDs of the selected responses for a checkbox field}")] = None,
+    communication: Annotated[dict[str, Any] | None, Field(description="Communication (communication) - Optional - leave out to keep the current value. The person's communication preferences. Object keys: {general_email (boolean, required): Whether this person has consented to receiving general emails; general_sms (boolean, required): Whether this person has consented to receiving general SMS messages; phone (boolean, required): Whether this person has consented to receiving phone calls; post (boolean, required): Whether this person has consented to receiving post; rota_email (boolean, required): Whether this person has consented to receiving rota emails; rota_sms (boolean, required): Whether this person has consented to receiving rota SMS messages}")] = None,
+    school: Annotated[str | None, Field(description="School (school) - Optional - leave out to keep the current value. The Child's school. (max 50 characters)")] = None,
+    school_year_offset: Annotated[int | None, Field(description="School year offset (school_year_offset) - Optional - leave out to keep the current value. Adjusted school year value based on the Child's age.")] = None,
+    medical_short: Annotated[str | None, Field(description="Medical short (medical_short) - Optional - leave out to keep the current value. Condensed medical information about the Child. (max 100 characters)")] = None,
+    medical: Annotated[str | None, Field(description="Medical (medical) - Optional - leave out to keep the current value. Full medical information about the Child. (max 65535 characters)")] = None,
+    doctor_details: Annotated[str | None, Field(description="Doctor details (doctor_details) - Optional - leave out to keep the current value. Child's doctors details. (max 65535 characters)")] = None,
+    additional_needs: Annotated[str | None, Field(description="Additional needs (additional_needs) - Optional - leave out to keep the current value. Any additional needs declared about the Child. (max 65535 characters)")] = None,
+    additional_info: Annotated[str | None, Field(description="Additional info (additional_info) - Optional - leave out to keep the current value. Additional information about the Child. (max 250 characters)")] = None,
+    login: Annotated[dict[str, Any] | None, Field(description="Login (login) - Optional - leave out to keep the current value. My ChurchSuite/CharitySuite login information. Object keys: {enabled (boolean, required): Whether the person is able to log into My; invited (boolean, required): Whether the person has been invited to create a My account}")] = None,
+    privacy: Annotated[dict[str, Any] | None, Field(description="Privacy (privacy) - Optional - leave out to keep the current value. The Child's privacy settings. Object keys: {name_visible (boolean, required): Whether the Child's name is visible in My; address_visible (boolean, required): Whether the Child's address is visible in My. This will only be respected if name_visible is true, else it will not be visible; mobile_visible (boolean, required): Whether the Child's mobile is visible in My. This will only be respected if name_visible is true, else it will not be visible; email_visible (boolean, required): Whether the Child's email is visible in My. This will only be respected if name_visible is true, else it will not be visible}")] = None,
+    all_sites: Annotated[bool | None, Field(description="All sites (all_sites) - Optional - leave out to keep the current value. Whether the Child belongs to All Sites.")] = None,
+    site_ids: Annotated[list[int] | None, Field(description="Site IDs (site_ids) - Optional - leave out to keep the current value. An array of Site IDs that the Child belongs to. If `all_sites` is `true`, this will be overridden. You are only able to add site IDs for sites you have the relevant permission for. HOW TO GET IT: No list tool for sites. Copy `site_ids` from an existing record (e.g. children_get_child), or use all_sites=true for every site.")] = None,
+    set_null: Annotated[list[Literal["sex", "date_of_birth", "email", "address"]] | None, Field(description="Optional. Names of fields to CLEAR (set to null). Allowed: sex, date_of_birth, email, address. Leave a field out of both its own parameter and this list to keep it unchanged.")] = None,
+) -> Any:
     """Update a child. Update a single child identified by ID.
-    first_name: The first name of the Child.
-    middle_name: The middle name of the Child.
-    last_name: The last name of the Child.
-    formal_name: The formal name of the Child.
-    sex: The sex of the Child.
-    date_of_birth: The Child's date of birth.
-    mobile: The Child's mobile number.
-    email: The Child's email address.
-    address: Edit a street Address. Object keys: line_1 (string, required): The first line of the Address; line_2 (string, required): The second line of the Address; line_3 (string, required): The third line of the Address; city (string, required): The city of the Address; county (string, required): The county of the Address; country (string or null, required): The country of the Address, in ISO3166 alpha 2 format; postcode (string, required): The postcode of the Address.
-    custom_fields: Custom Field responses for this resource
-    communication: The person's communication preferences. Object keys: general_email (boolean, required): Whether this person has consented to receiving general emails; general_sms (boolean, required): Whether this person has consented to receiving general SMS messages; phone (boolean, required): Whether this person has consented to receiving phone calls; post (boolean, required): Whether this person has consented to receiving post; rota_email (boolean, required): Whether this person has consented to receiving rota emails; rota_sms (boolean, required): Whether this person has consented to receiving rota SMS messages.
-    school: The Child's school.
-    school_year_offset: Adjusted school year value based on the Child's age.
-    medical_short: Condensed medical information about the Child.
-    medical: Full medical information about the Child.
-    doctor_details: Child's doctors details.
-    additional_needs: Any additional needs declared about the Child.
-    additional_info: Additional information about the Child.
-    login: My ChurchSuite/CharitySuite login information. Keys: enabled, invited.
-    privacy: The Child's privacy settings. Object keys: name_visible (boolean, required): Whether the Child's name is visible in My; address_visible (boolean, required): Whether the Child's address is visible in My. This will only be respected if name_visible is true, else it will not be visible; mobile_visible (boolean, required): Whether the Child's mobile is visible in My. This will only be respected if name_visible is true, else it will not be visible; email_visible (boolean, required): Whether the Child's email is visible in My. This will only be respected if name_visible is true, else it will not be visible.
-    all_sites: Whether the Child belongs to All Sites.
-    site_ids: An array of Site IDs that the Child belongs to. If `all_sites` is `true`, this will be overridden. You are only able to add site IDs for sites you have the relevant permission for.
-    set_null: names of nullable fields to clear (sex, date_of_birth, email, address)."""
-    return await _request("PUT", f"/children/children/{id}", None, _body({"first_name": first_name, "middle_name": middle_name, "last_name": last_name, "formal_name": formal_name, "sex": sex, "date_of_birth": date_of_birth, "mobile": mobile, "email": email, "address": address, "custom_fields": custom_fields, "communication": communication, "school": school, "school_year_offset": school_year_offset, "medical_short": medical_short, "medical": medical, "doctor_details": doctor_details, "additional_needs": additional_needs, "additional_info": additional_info, "login": login, "privacy": privacy, "all_sites": all_sites, "site_ids": site_ids}, set_null, ("sex", "date_of_birth", "email", "address", )))
+    
+    WHAT YOU NEED TO PROVIDE
+      - id (required): ID of the child to change. Find it with children_list_children (use `q` to search) or the matching get tool.
+      - first_name (optional): The first name of the Child (max 50 characters; cannot be empty)
+      - middle_name (optional): The middle name of the Child (max 50 characters)
+      - last_name (optional): The last name of the Child (max 50 characters; cannot be empty)
+      - formal_name (optional): The formal name of the Child (max 50 characters)
+      - sex (optional): The sex of the Child (one of: female, male)
+      - date_of_birth (optional): The Child's date of birth (date as YYYY-MM-DD)
+      - mobile (optional): The Child's mobile number (max 20 characters)
+      - email (optional): The Child's email address (max 100 characters; an email address)
+      - address (optional): Edit a street Address
+      - custom_fields (optional): Custom Field responses for this resource -> Use children_list_custom_fields to find each field's `id` and type.
+      - communication (optional): The person's communication preferences
+      - school (optional): The Child's school (max 50 characters)
+      - school_year_offset (optional): Adjusted school year value based on the Child's age
+      - medical_short (optional): Condensed medical information about the Child (max 100 characters)
+      - medical (optional): Full medical information about the Child (max 65535 characters)
+      - doctor_details (optional): Child's doctors details (max 65535 characters)
+      - additional_needs (optional): Any additional needs declared about the Child (max 65535 characters)
+      - additional_info (optional): Additional information about the Child (max 250 characters)
+      - login (optional): My ChurchSuite/CharitySuite login information
+      - privacy (optional): The Child's privacy settings
+      - all_sites (optional): Whether the Child belongs to All Sites
+      - site_ids (optional): An array of Site IDs that the Child belongs to. If `all_sites` is `true`, this will be overridden. You are only able to add site IDs for sites you have the relevant permission for -> No list tool for sites. Copy `site_ids` from an existing record (e.g. children_get_child), or use all_sites=true for every site.
+      - set_null (optional): list of fields to clear: sex, date_of_birth, email, address."""
+    body = _body({"first_name": first_name, "middle_name": middle_name, "last_name": last_name, "formal_name": formal_name, "sex": sex, "date_of_birth": date_of_birth, "mobile": mobile, "email": email, "address": address, "custom_fields": custom_fields, "communication": communication, "school": school, "school_year_offset": school_year_offset, "medical_short": medical_short, "medical": medical, "doctor_details": doctor_details, "additional_needs": additional_needs, "additional_info": additional_info, "login": login, "privacy": privacy, "all_sites": all_sites, "site_ids": site_ids}, set_null, ("sex", "date_of_birth", "email", "address", ), keep=())
+    return await _request("PUT", f"/children/children/{id}", None, body)
 
 @tool("children", "PUT")
-async def children_edit_flow_stage(id: int, name: str, instructions: str, due_interval: int, due_period: Literal["days", "weeks", "months"], due_from: Literal["first_added", "previous_stage"], assigned_user_id: int | None, automate_time: str | None) -> Any:
+async def children_edit_flow_stage(
+    id: Annotated[int, Field(description="ID (id) - REQUIRED. ID of the flow stage to change. Find it with children_list_flow_stages (use `q` to search) or the matching get tool.")],
+    name: Annotated[str, Field(description="Name (name) - REQUIRED. The Stage's name. (max 50 characters; cannot be empty)")],
+    instructions: Annotated[str, Field(description="Instructions (instructions) - REQUIRED. The instructions for the Stage. (max 65535 characters)")],
+    due_interval: Annotated[int, Field(description="Due interval (due_interval) - REQUIRED. The number of days, weeks or months used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage.")],
+    due_period: Annotated[Literal["days", "weeks", "months"], Field(description="Due period (due_period) - REQUIRED. The due period used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage. (one of: days, weeks, months)")],
+    due_from: Annotated[Literal["first_added", "previous_stage"], Field(description="Due from (due_from) - REQUIRED. The relative point used for tracking a person linked to the Stage, either when they are first added to the flow or when they are processed from a previous stage. (one of: first_added, previous_stage)")],
+    assigned_user_id: Annotated[int | None, Field(description="Assigned user ID (assigned_user_id) - REQUIRED. The ID of the user automatically assigned to people in this stage, or null if no user is assigned. HOW TO GET IT: A ChurchSuite user ID. No list tool; it appears as `assigned_user_id` on existing flow stages/trackings.")],
+    automate_time: Annotated[str | None, Field(description="Automate time (automate_time) - REQUIRED. The UTC time the Stage will automatically process any due or overdue people if it is automated, or null if it is not automated.")],
+) -> Any:
     """Update a flow stage. Update a single stage identified by ID.
-    name (required): The Stage's name.
-    instructions (required): The instructions for the Stage.
-    due_interval (required): The number of days, weeks or months used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage.
-    due_period (required): The due period used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage.
-    due_from (required): The relative point used for tracking a person linked to the Stage, either when they are first added to the flow or when they are processed from a previous stage.
-    assigned_user_id (required): The ID of the user automatically assigned to people in this stage, or null if no user is assigned.
-    automate_time (required): The UTC time the Stage will automatically process any due or overdue people if it is automated, or null if it is not automated."""
-    return await _request("PUT", f"/children/flow_stages/{id}", None, _body({"name": name, "instructions": instructions, "due_interval": due_interval, "due_period": due_period, "due_from": due_from, "assigned_user_id": assigned_user_id, "automate_time": automate_time}, None, (), keep=("assigned_user_id", "automate_time", )))
+    
+    WHAT YOU NEED TO PROVIDE
+      - id (required): ID of the flow stage to change. Find it with children_list_flow_stages (use `q` to search) or the matching get tool.
+      - name (required): The Stage's name (max 50 characters; cannot be empty)
+      - instructions (required): The instructions for the Stage (max 65535 characters)
+      - due_interval (required): The number of days, weeks or months used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage
+      - due_period (required): The due period used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage (one of: days, weeks, months)
+      - due_from (required): The relative point used for tracking a person linked to the Stage, either when they are first added to the flow or when they are processed from a previous stage (one of: first_added, previous_stage)
+      - assigned_user_id (required): The ID of the user automatically assigned to people in this stage, or null if no user is assigned -> A ChurchSuite user ID. No list tool; it appears as `assigned_user_id` on existing flow stages/trackings.
+      - automate_time (required): The UTC time the Stage will automatically process any due or overdue people if it is automated, or null if it is not automated"""
+    body = _body({"name": name, "instructions": instructions, "due_interval": due_interval, "due_period": due_period, "due_from": due_from, "assigned_user_id": assigned_user_id, "automate_time": automate_time}, None, (), keep=("assigned_user_id", "automate_time", ))
+    return await _request("PUT", f"/children/flow_stages/{id}", None, body)
 
 @tool("children", "PUT")
-async def children_edit_flow_tracking(id: int, due_date: str, assigned_user_id: int | None) -> Any:
-    """Update a flow tracking. Update a single flow tracking, linked to a person's process through a flow, identified by ID.
-    due_date (required): The Tracking's due date.
-    assigned_user_id (required): The Tracking's assigned user ID, or null if not assigned to a user."""
-    return await _request("PUT", f"/children/flow_trackings/{id}", None, _body({"due_date": due_date, "assigned_user_id": assigned_user_id}, None, (), keep=("assigned_user_id", )))
+async def children_edit_flow_tracking(
+    id: Annotated[int, Field(description="ID (id) - REQUIRED. ID of the flow tracking to change. Find it with children_list_flow_trackings (use `q` to search) or the matching get tool.")],
+    due_date: Annotated[str, Field(description="Due date (due_date) - REQUIRED. The Tracking's due date. (date as YYYY-MM-DD)")],
+    assigned_user_id: Annotated[int | None, Field(description="Assigned user ID (assigned_user_id) - REQUIRED. The Tracking's assigned user ID, or null if not assigned to a user. HOW TO GET IT: A ChurchSuite user ID. No list tool; it appears as `assigned_user_id` on existing flow stages/trackings.")],
+) -> Any:
+    """Update a flow tracking. Update a single flow tracking, linked to a person's progress through a flow, identified by ID.
+    
+    WHAT YOU NEED TO PROVIDE
+      - id (required): ID of the flow tracking to change. Find it with children_list_flow_trackings (use `q` to search) or the matching get tool.
+      - due_date (required): The Tracking's due date (date as YYYY-MM-DD)
+      - assigned_user_id (required): The Tracking's assigned user ID, or null if not assigned to a user -> A ChurchSuite user ID. No list tool; it appears as `assigned_user_id` on existing flow stages/trackings."""
+    body = _body({"due_date": due_date, "assigned_user_id": assigned_user_id}, None, (), keep=("assigned_user_id", ))
+    return await _request("PUT", f"/children/flow_trackings/{id}", None, body)
 
 @tool("children", "PUT")
-async def children_edit_key_date(id: int, name: str, colour: Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"], visible_to: Any | None) -> Any:
+async def children_edit_key_date(
+    id: Annotated[int, Field(description="ID (id) - REQUIRED. ID of the key date to change. Find it with children_list_key_dates (use `q` to search) or the matching get tool.")],
+    name: Annotated[str, Field(description="Name (name) - REQUIRED. The Key Date's name. (max 50 characters; cannot be empty)")],
+    colour: Annotated[Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"], Field(description="Colour (colour) - REQUIRED. The Key Date's colour. (one of: blue, red, orange, green, purple, pink, brown, grey)")],
+    visible_to: Annotated[dict[str, Any] | None, Field(description="Visible to (visible_to) - REQUIRED. Who the resource is visible to. Null if there are no restrictions. If `just_me` is true, `user_group_ids` must be empty or not set. If `just_me` is false, `user_group_ids` must contain at least one User Group ID. Object keys: ONE of these shapes: {just_me (one of false): The resource should only be visible to the current user; user_group_ids (list of integer, required): List of user group IDs the resource is visible to -> ChurchSuite user-group IDs. No list tool; copy them from an existing record's visible_to, or ask a ChurchSuite admin.} OR {just_me (one of true, required): The resource should only be visible to the current user; user_group_ids (list of integer): List of user group IDs the resource is visible to -> ChurchSuite user-group IDs. No list tool; copy them from an existing record's visible_to, or ask a ChurchSuite admin.}")],
+) -> Any:
     """Update a key date. Update a single key date identified by ID.
-    name (required): The Key Date's name.
-    colour (required): The Key Date's colour.
-    visible_to (required): Who the resource is visible to. Null if there are no restrictions. If `just_me` is true, `user_group_ids` must be empty or not set. If `just_me` is false, `user_group_ids` must contain at least one User Group ID. Object, one of these shapes: {just_me: must be false, user_group_ids: array of integer [required]} OR {just_me: must be true [required], user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to."""
-    return await _request("PUT", f"/children/key_dates/{id}", None, _body({"name": name, "colour": colour, "visible_to": visible_to}, None, (), keep=("visible_to", )))
+    
+    WHAT YOU NEED TO PROVIDE
+      - id (required): ID of the key date to change. Find it with children_list_key_dates (use `q` to search) or the matching get tool.
+      - name (required): The Key Date's name (max 50 characters; cannot be empty)
+      - colour (required): The Key Date's colour (one of: blue, red, orange, green, purple, pink, brown, grey)
+      - visible_to (required): Who the resource is visible to. Null if there are no restrictions. If `just_me` is true, `user_group_ids` must be empty or not set. If `just_me` is false, `user_group_ids` must contain at least one User Group ID"""
+    body = _body({"name": name, "colour": colour, "visible_to": visible_to}, None, (), keep=("visible_to", ))
+    return await _request("PUT", f"/children/key_dates/{id}", None, body)
 
 @tool("children", "PUT")
-async def children_edit_key_date_resource(id: int, date: str, description: str) -> Any:
+async def children_edit_key_date_resource(
+    id: Annotated[int, Field(description="ID (id) - REQUIRED. ID of the key date resource to change. Find it with children_list_key_date_resources (use `q` to search) or the matching get tool.")],
+    date: Annotated[str, Field(description="Date (date) - REQUIRED. The date of the Key Date Resource. (date as YYYY-MM-DD)")],
+    description: Annotated[str, Field(description="Description (description) - REQUIRED. The description of this Key Date Resource. (max 65535 characters)")],
+) -> Any:
     """Update a key date resource. Update a single key date resource identified by ID.
-    date (required): The date of the Key Date Resource.
-    description (required): The description of this Key Date Resource."""
-    return await _request("PUT", f"/children/key_date_resources/{id}", None, _body({"date": date, "description": description}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - id (required): ID of the key date resource to change. Find it with children_list_key_date_resources (use `q` to search) or the matching get tool.
+      - date (required): The date of the Key Date Resource (date as YYYY-MM-DD)
+      - description (required): The description of this Key Date Resource (max 65535 characters)"""
+    body = _body({"date": date, "description": description}, None, (), keep=())
+    return await _request("PUT", f"/children/key_date_resources/{id}", None, body)
 
 @tool("children", "PUT")
-async def children_edit_tag(id: int, name: str, category_id: int | None, description: str, colour: Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"], visible_to: Any | None, pinned_icon: Literal["tick", "cross", "archive", "warning", "flag", "magic", "star", "profile", "user", "couple", "group", "pledge", "education", "job", "gift", "role", "duration", "smiley-happy", "smiley-neutral", "smiley-sad"] | None) -> Any:
-    """Update a tag
-    name (required): The Tag's name.
-    category_id (required): The Tag's Category ID.
-    description (required): The description of the Tag.
-    colour (required): The name of the colour of the Tag.
-    visible_to (required): Who the resource is visible to. Null if there are no restrictions. If `just_me` is true, `user_group_ids` must be empty or not set. If `just_me` is false, `user_group_ids` must contain at least one User Group ID. Object, one of these shapes: {just_me: must be false, user_group_ids: array of integer [required]} OR {just_me: must be true [required], user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to.
-    pinned_icon (required): Pin this Tag by specifying an icon. This will be displayed within the application."""
-    return await _request("PUT", f"/children/tags/{id}", None, _body({"name": name, "category_id": category_id, "description": description, "colour": colour, "visible_to": visible_to, "pinned_icon": pinned_icon}, None, (), keep=("category_id", "visible_to", "pinned_icon", )))
+async def children_edit_tag(
+    id: Annotated[int, Field(description="ID (id) - REQUIRED. ID of the tag to change. Find it with children_list_tags (use `q` to search) or the matching get tool.")],
+    name: Annotated[str, Field(description="Name (name) - REQUIRED. The Tag's name. (max 50 characters; cannot be empty)")],
+    category_id: Annotated[int | None, Field(description="Category ID (category_id) - REQUIRED. The Tag's Category ID. HOW TO GET IT: Run children_list_tag_categories and use the `id` of the category.")],
+    description: Annotated[str, Field(description="Description (description) - REQUIRED. The description of the Tag. (max 65535 characters)")],
+    colour: Annotated[Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"], Field(description="Colour (colour) - REQUIRED. The name of the colour of the Tag. (one of: blue, red, orange, green, purple, pink, brown, grey)")],
+    visible_to: Annotated[dict[str, Any] | None, Field(description="Visible to (visible_to) - REQUIRED. Who the resource is visible to. Null if there are no restrictions. If `just_me` is true, `user_group_ids` must be empty or not set. If `just_me` is false, `user_group_ids` must contain at least one User Group ID. Object keys: ONE of these shapes: {just_me (one of false): The resource should only be visible to the current user; user_group_ids (list of integer, required): List of user group IDs the resource is visible to -> ChurchSuite user-group IDs. No list tool; copy them from an existing record's visible_to, or ask a ChurchSuite admin.} OR {just_me (one of true, required): The resource should only be visible to the current user; user_group_ids (list of integer): List of user group IDs the resource is visible to -> ChurchSuite user-group IDs. No list tool; copy them from an existing record's visible_to, or ask a ChurchSuite admin.}")],
+    pinned_icon: Annotated[Literal["tick", "cross", "archive", "warning", "flag", "magic", "star", "profile", "user", "couple", "group", "pledge", "education", "job", "gift", "role", "duration", "smiley-happy", "smiley-neutral", "smiley-sad"] | None, Field(description="Pinned icon (pinned_icon) - REQUIRED. Pin this Tag by specifying an icon. This will be displayed within the application. (one of: tick, cross, archive, warning, flag, magic, star, profile, user, couple, group, pledge, education, job, gift, role, duration, smiley-happy, smiley-neutral, smiley-sad)")],
+) -> Any:
+    """Update a tag.
+    
+    WHAT YOU NEED TO PROVIDE
+      - id (required): ID of the tag to change. Find it with children_list_tags (use `q` to search) or the matching get tool.
+      - name (required): The Tag's name (max 50 characters; cannot be empty)
+      - category_id (required): The Tag's Category ID -> Run children_list_tag_categories and use the `id` of the category.
+      - description (required): The description of the Tag (max 65535 characters)
+      - colour (required): The name of the colour of the Tag (one of: blue, red, orange, green, purple, pink, brown, grey)
+      - visible_to (required): Who the resource is visible to. Null if there are no restrictions. If `just_me` is true, `user_group_ids` must be empty or not set. If `just_me` is false, `user_group_ids` must contain at least one User Group ID
+      - pinned_icon (required): Pin this Tag by specifying an icon. This will be displayed within the application (one of: tick, cross, archive, warning, flag, magic, star, profile, user, couple, group, pledge, education, job, gift, role, duration, smiley-happy, smiley-neutral, smiley-sad)"""
+    body = _body({"name": name, "category_id": category_id, "description": description, "colour": colour, "visible_to": visible_to, "pinned_icon": pinned_icon}, None, (), keep=("category_id", "visible_to", "pinned_icon", ))
+    return await _request("PUT", f"/children/tags/{id}", None, body)
 
 @tool("children", "DELETE")
 async def children_delete_child(id: int) -> Any:
@@ -1317,44 +1770,85 @@ async def network_list_roles(page: int | None = None, per_page: int | None = Non
     return await _request("GET", "/network/roles", {"page": page, "per_page": per_page, "q": q})
 
 @tool("network", "POST")
-async def network_create_key_date(name: str, colour: Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"], visible_to: Any | None = None) -> Any:
+async def network_create_key_date(
+    name: Annotated[str, Field(description="Name (name) - REQUIRED. The Key Date's name. (max 50 characters; cannot be empty)")],
+    colour: Annotated[Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"], Field(description="Colour (colour) - REQUIRED. The Key Date's colour. (one of: blue, red, orange, green, purple, pink, brown, grey)")],
+    visible_to: Annotated[dict[str, Any] | None, Field(description="Visible to (visible_to) - Optional. Object keys: ONE of these shapes: {just_me (one of true): The resource should only be visible to the current user} OR {user_group_ids (list of integer): List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to -> ChurchSuite user-group IDs. No list tool; copy them from an existing record's visible_to, or ask a ChurchSuite admin.}")] = None,
+) -> Any:
     """Create a key date. Create a key date with the provided settings.
-    name (required): The Key Date's name.
-    colour (required): The Key Date's colour.
-    visible_to: Object, one of these shapes: {just_me: must be true} OR {user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to."""
-    return await _request("POST", "/network/key_dates", None, _body({"name": name, "colour": colour, "visible_to": visible_to}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - name (required): The Key Date's name (max 50 characters; cannot be empty)
+      - colour (required): The Key Date's colour (one of: blue, red, orange, green, purple, pink, brown, grey)
+      - visible_to (optional): Visible to"""
+    body = _body({"name": name, "colour": colour, "visible_to": visible_to}, None, (), keep=())
+    return await _request("POST", "/network/key_dates", None, body)
 
 @tool("network", "POST")
-async def network_create_key_date_resource(key_date_id: int, resource: dict[str, Any], date: str, description: str | None = None) -> Any:
+async def network_create_key_date_resource(
+    key_date_id: Annotated[int, Field(description="Key date ID (key_date_id) - REQUIRED. The Key Date's ID. HOW TO GET IT: Run network_list_key_dates and use the key date `id`.")],
+    resource: Annotated[dict[str, Any], Field(description="Resource (resource) - REQUIRED. The resource to link to the Key Date. Object keys: {id (integer, required): The ID of the resource -> Organisation ID: network_list_organisations.}")],
+    date: Annotated[str, Field(description="Date (date) - REQUIRED. The date of the Key Date Resource. (date as YYYY-MM-DD)")],
+    description: Annotated[str | None, Field(description="Description (description) - Optional. The description of this Key Date Resource. (max 65535 characters)")] = None,
+) -> Any:
     """Create a key date resource. Create a key date resource adding an organisation to a key date
-    key_date_id (required): The Key Date's ID.
-    resource (required): The resource to link to the Key Date. Keys: id.
-    date (required): The date of the Key Date Resource.
-    description: The description of this Key Date Resource."""
-    return await _request("POST", "/network/key_date_resources", None, _body({"key_date_id": key_date_id, "resource": resource, "date": date, "description": description}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - key_date_id (required): The Key Date's ID -> Run network_list_key_dates and use the key date `id`.
+      - resource (required): The resource to link to the Key Date
+      - date (required): The date of the Key Date Resource (date as YYYY-MM-DD)
+      - description (optional): The description of this Key Date Resource (max 65535 characters)"""
+    body = _body({"key_date_id": key_date_id, "resource": resource, "date": date, "description": description}, None, (), keep=())
+    return await _request("POST", "/network/key_date_resources", None, body)
 
 @tool("network", "POST")
-async def network_create_organisation_note(id: int, content: str, pinned: bool | None = None, visible_to: Any | None = None) -> Any:
+async def network_create_organisation_note(
+    id: Annotated[int, Field(description="ID (id) - REQUIRED. ID of the organisation to add the note to. Find it with network_list_organisations (use `q` to search).")],
+    content: Annotated[str, Field(description="Content (content) - REQUIRED. The content of the Note. (max 65535 characters; cannot be empty)")],
+    pinned: Annotated[bool | None, Field(description="Pinned (pinned) - Optional. Whether the Note should be pinned.")] = None,
+    visible_to: Annotated[dict[str, Any] | None, Field(description="Visible to (visible_to) - Optional. Object keys: ONE of these shapes: {just_me (one of true): The resource should only be visible to the current user} OR {user_group_ids (list of integer): List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to -> ChurchSuite user-group IDs. No list tool; copy them from an existing record's visible_to, or ask a ChurchSuite admin.}")] = None,
+) -> Any:
     """Create a organisation note. Create a Note against a Organisation in the Network module.
-    content (required): The content of the Note.
-    pinned: Whether the Note should be pinned.
-    visible_to: Object, one of these shapes: {just_me: must be true} OR {user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to."""
-    return await _request("POST", f"/network/organisations/{id}/notes", None, _body({"content": content, "pinned": pinned, "visible_to": visible_to}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - id (required): ID of the organisation to add the note to. Find it with network_list_organisations (use `q` to search).
+      - content (required): The content of the Note (max 65535 characters; cannot be empty)
+      - pinned (optional): Whether the Note should be pinned
+      - visible_to (optional): Visible to"""
+    body = _body({"content": content, "pinned": pinned, "visible_to": visible_to}, None, (), keep=())
+    return await _request("POST", f"/network/organisations/{id}/notes", None, body)
 
 @tool("network", "PUT")
-async def network_edit_key_date(id: int, name: str, colour: Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"], visible_to: Any | None) -> Any:
+async def network_edit_key_date(
+    id: Annotated[int, Field(description="ID (id) - REQUIRED. ID of the key date to change. Find it with network_list_key_dates (use `q` to search) or the matching get tool.")],
+    name: Annotated[str, Field(description="Name (name) - REQUIRED. The Key Date's name. (max 50 characters; cannot be empty)")],
+    colour: Annotated[Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"], Field(description="Colour (colour) - REQUIRED. The Key Date's colour. (one of: blue, red, orange, green, purple, pink, brown, grey)")],
+    visible_to: Annotated[dict[str, Any] | None, Field(description="Visible to (visible_to) - REQUIRED. Who the resource is visible to. Null if there are no restrictions. If `just_me` is true, `user_group_ids` must be empty or not set. If `just_me` is false, `user_group_ids` must contain at least one User Group ID. Object keys: ONE of these shapes: {just_me (one of false): The resource should only be visible to the current user; user_group_ids (list of integer, required): List of user group IDs the resource is visible to -> ChurchSuite user-group IDs. No list tool; copy them from an existing record's visible_to, or ask a ChurchSuite admin.} OR {just_me (one of true, required): The resource should only be visible to the current user; user_group_ids (list of integer): List of user group IDs the resource is visible to -> ChurchSuite user-group IDs. No list tool; copy them from an existing record's visible_to, or ask a ChurchSuite admin.}")],
+) -> Any:
     """Update a key date. Update a single key date identified by ID.
-    name (required): The Key Date's name.
-    colour (required): The Key Date's colour.
-    visible_to (required): Who the resource is visible to. Null if there are no restrictions. If `just_me` is true, `user_group_ids` must be empty or not set. If `just_me` is false, `user_group_ids` must contain at least one User Group ID. Object, one of these shapes: {just_me: must be false, user_group_ids: array of integer [required]} OR {just_me: must be true [required], user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to."""
-    return await _request("PUT", f"/network/key_dates/{id}", None, _body({"name": name, "colour": colour, "visible_to": visible_to}, None, (), keep=("visible_to", )))
+    
+    WHAT YOU NEED TO PROVIDE
+      - id (required): ID of the key date to change. Find it with network_list_key_dates (use `q` to search) or the matching get tool.
+      - name (required): The Key Date's name (max 50 characters; cannot be empty)
+      - colour (required): The Key Date's colour (one of: blue, red, orange, green, purple, pink, brown, grey)
+      - visible_to (required): Who the resource is visible to. Null if there are no restrictions. If `just_me` is true, `user_group_ids` must be empty or not set. If `just_me` is false, `user_group_ids` must contain at least one User Group ID"""
+    body = _body({"name": name, "colour": colour, "visible_to": visible_to}, None, (), keep=("visible_to", ))
+    return await _request("PUT", f"/network/key_dates/{id}", None, body)
 
 @tool("network", "PUT")
-async def network_edit_key_date_resource(id: int, date: str, description: str) -> Any:
+async def network_edit_key_date_resource(
+    id: Annotated[int, Field(description="ID (id) - REQUIRED. ID of the key date resource to change. Find it with network_list_key_date_resources (use `q` to search) or the matching get tool.")],
+    date: Annotated[str, Field(description="Date (date) - REQUIRED. The date of the Key Date Resource. (date as YYYY-MM-DD)")],
+    description: Annotated[str, Field(description="Description (description) - REQUIRED. The description of this Key Date Resource. (max 65535 characters)")],
+) -> Any:
     """Update a key date resource. Update a single key date resource identified by ID.
-    date (required): The date of the Key Date Resource.
-    description (required): The description of this Key Date Resource."""
-    return await _request("PUT", f"/network/key_date_resources/{id}", None, _body({"date": date, "description": description}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - id (required): ID of the key date resource to change. Find it with network_list_key_date_resources (use `q` to search) or the matching get tool.
+      - date (required): The date of the Key Date Resource (date as YYYY-MM-DD)
+      - description (required): The description of this Key Date Resource (max 65535 characters)"""
+    body = _body({"date": date, "description": description}, None, (), keep=())
+    return await _request("PUT", f"/network/key_date_resources/{id}", None, body)
 
 @tool("network", "DELETE")
 async def network_delete_key_date(id: int) -> Any:
@@ -1367,23 +1861,42 @@ async def network_delete_key_date_resource(id: int) -> Any:
     return await _request("DELETE", f"/network/key_date_resources/{id}", None)
 
 @tool("network", "POST")
-async def network_create_label(name: str, colour: Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"], options: list[str], multiple_responses: bool, required: bool) -> Any:
+async def network_create_label(
+    name: Annotated[str, Field(description="Name (name) - REQUIRED. The Label's name. (max 50 characters; cannot be empty)")],
+    colour: Annotated[Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"], Field(description="Colour (colour) - REQUIRED. The Label's colour. (one of: blue, red, orange, green, purple, pink, brown, grey)")],
+    options: Annotated[list[str], Field(description="Options (options) - REQUIRED. List of options that belong to the Label.")],
+    multiple_responses: Annotated[bool, Field(description="Multiple responses (multiple_responses) - REQUIRED. Whether the Label can have multiple responses.")],
+    required: Annotated[bool, Field(description="Required (required) - REQUIRED. Whether the Label is required.")],
+) -> Any:
     """Create a label. Create a label with the provided settings.
-    name (required): The Label's name (1-50 chars).
-    colour (required): The Label's colour.
-    options (required): List of options that belong to the Label (each 1-50 chars).
-    multiple_responses (required): Whether the Label can have multiple responses.
-    required (required): Whether the Label is required."""
-    return await _request("POST", "/network/labels", None, _body({"name": name, "colour": colour, "options": options, "multiple_responses": multiple_responses, "required": required}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - name (required): The Label's name (max 50 characters; cannot be empty)
+      - colour (required): The Label's colour (one of: blue, red, orange, green, purple, pink, brown, grey)
+      - options (required): List of options that belong to the Label
+      - multiple_responses (required): Whether the Label can have multiple responses
+      - required (required): Whether the Label is required"""
+    body = _body({"name": name, "colour": colour, "options": options, "multiple_responses": multiple_responses, "required": required}, None, (), keep=())
+    return await _request("POST", "/network/labels", None, body)
 
 @tool("network", "PUT")
-async def network_edit_label(id: int, name: str | None = None, colour: Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"] | None = None, multiple_responses: bool | None = None, required: bool | None = None) -> Any:
-    """Update a label. Update a single label identified by ID. (Options cannot be changed through this endpoint.)
-    name: The Label's name (1-50 chars).
-    colour: The Label's colour.
-    multiple_responses: Whether the Label can have multiple responses.
-    required: Whether the Label is required."""
-    return await _request("PUT", f"/network/labels/{id}", None, _body({"name": name, "colour": colour, "multiple_responses": multiple_responses, "required": required}, None, ()))
+async def network_edit_label(
+    id: Annotated[int, Field(description="ID (id) - REQUIRED. ID of the label to change. Find it with network_list_labels (use `q` to search) or the matching get tool.")],
+    name: Annotated[str | None, Field(description="Name (name) - Optional - leave out to keep the current value. The Label's name. (max 50 characters; cannot be empty)")] = None,
+    colour: Annotated[Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"] | None, Field(description="Colour (colour) - Optional - leave out to keep the current value. The Label's colour. (one of: blue, red, orange, green, purple, pink, brown, grey)")] = None,
+    multiple_responses: Annotated[bool | None, Field(description="Multiple responses (multiple_responses) - Optional - leave out to keep the current value. Whether the Label can have multiple responses.")] = None,
+    required: Annotated[bool | None, Field(description="Required (required) - Optional - leave out to keep the current value. Whether the Label is required.")] = None,
+) -> Any:
+    """Update a label. Update a single label identified by ID.
+    
+    WHAT YOU NEED TO PROVIDE
+      - id (required): ID of the label to change. Find it with network_list_labels (use `q` to search) or the matching get tool.
+      - name (optional): The Label's name (max 50 characters; cannot be empty)
+      - colour (optional): The Label's colour (one of: blue, red, orange, green, purple, pink, brown, grey)
+      - multiple_responses (optional): Whether the Label can have multiple responses
+      - required (optional): Whether the Label is required"""
+    body = _body({"name": name, "colour": colour, "multiple_responses": multiple_responses, "required": required}, None, (), keep=())
+    return await _request("PUT", f"/network/labels/{id}", None, body)
 
 @tool("network", "DELETE")
 async def network_delete_label(id: int) -> Any:
@@ -1503,12 +2016,21 @@ async def planning_list_types(page: int | None = None, per_page: int | None = No
     return await _request("GET", "/planning/types", {"page": page, "per_page": per_page, "q": q})
 
 @tool("planning", "POST")
-async def planning_create_plan_note(id: int, content: str, pinned: bool | None = None, visible_to: Any | None = None) -> Any:
+async def planning_create_plan_note(
+    id: Annotated[int, Field(description="ID (id) - REQUIRED. ID of the plan to add the note to. Find it with planning_list_plans (use `q` to search).")],
+    content: Annotated[str, Field(description="Content (content) - REQUIRED. The content of the Note. (max 65535 characters; cannot be empty)")],
+    pinned: Annotated[bool | None, Field(description="Pinned (pinned) - Optional. Whether the Note should be pinned.")] = None,
+    visible_to: Annotated[dict[str, Any] | None, Field(description="Visible to (visible_to) - Optional. Object keys: ONE of these shapes: {just_me (one of true): The resource should only be visible to the current user} OR {user_group_ids (list of integer): List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to -> ChurchSuite user-group IDs. No list tool; copy them from an existing record's visible_to, or ask a ChurchSuite admin.}")] = None,
+) -> Any:
     """Create a plan note. Create a Note against a Plan in the Planning module.
-    content (required): The content of the Note.
-    pinned: Whether the Note should be pinned.
-    visible_to: Object, one of these shapes: {just_me: must be true} OR {user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to."""
-    return await _request("POST", f"/planning/plans/{id}/notes", None, _body({"content": content, "pinned": pinned, "visible_to": visible_to}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - id (required): ID of the plan to add the note to. Find it with planning_list_plans (use `q` to search).
+      - content (required): The content of the Note (max 65535 characters; cannot be empty)
+      - pinned (optional): Whether the Note should be pinned
+      - visible_to (optional): Visible to"""
+    body = _body({"content": content, "pinned": pinned, "visible_to": visible_to}, None, (), keep=())
+    return await _request("POST", f"/planning/plans/{id}/notes", None, body)
 
 
 
@@ -1568,13 +2090,21 @@ async def rotas_list_unavailability(page: int | None = None, per_page: int | Non
     return await _request("GET", "/rotas/unavailability", {"page": page, "per_page": per_page, "contact_ids[]": contact_ids, "child_ids[]": child_ids, "ministry_ids[]": ministry_ids, "starts_before": starts_before, "starts_after": starts_after, "order_by": order_by})
 
 @tool("rotas", "POST")
-async def rotas_create_unavailability(person: dict[str, Any], starts_at: str, ends_at: str, description: str | None = None) -> Any:
+async def rotas_create_unavailability(
+    person: Annotated[dict[str, Any], Field(description="Person (person) - REQUIRED. The Person this Unavailability record belongs to. Object keys: {type (one of addressbook_contact/children_child, required): The Person's type, indicating whether they are a Contact, or Child -> 'addressbook_contact' for a Contact or 'children_child' for a Child.; id (integer, required): The Person's ID -> A Contact ID (addressbook_list_contacts) or Child ID (children_list_children), matching `type`.}")],
+    starts_at: Annotated[str, Field(description="Starts at (starts_at) - REQUIRED. The date and time the Unavailability starts. To create unavailability lasting all day, start at 00:00:00 and end at 23:59:59. (ISO 8601 date-time; a trailing Z means UTC, e.g. 2026-11-01T10:00:00Z)")],
+    ends_at: Annotated[str, Field(description="Ends at (ends_at) - REQUIRED. The date and time the Unavailability ends. To create unavailability lasting all day, start at 00:00:00 and end at 23:59:59. (ISO 8601 date-time; a trailing Z means UTC, e.g. 2026-11-01T10:00:00Z)")],
+    description: Annotated[str | None, Field(description="Description (description) - Optional. The Unavailability's description. (max 250 characters; cannot be empty)")] = None,
+) -> Any:
     """Create unavailability. Create unavailability, with the provided settings.
-    person (required): The Person this Unavailability record belongs to. Keys: type, id.
-    starts_at (required): The date and time the Unavailability starts. To create unavailability lasting all day, start at 00:00:00 and end at 23:59:59.
-    ends_at (required): The date and time the Unavailability ends. To create unavailability lasting all day, start at 00:00:00 and end at 23:59:59.
-    description: The Unavailability's description."""
-    return await _request("POST", "/rotas/unavailability", None, _body({"person": person, "starts_at": starts_at, "ends_at": ends_at, "description": description}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - person (required): The Person this Unavailability record belongs to
+      - starts_at (required): The date and time the Unavailability starts. To create unavailability lasting all day, start at 00:00:00 and end at 23:59:59 (ISO 8601 date-time; a trailing Z means UTC, e.g. 2026-11-01T10:00:00Z)
+      - ends_at (required): The date and time the Unavailability ends. To create unavailability lasting all day, start at 00:00:00 and end at 23:59:59 (ISO 8601 date-time; a trailing Z means UTC, e.g. 2026-11-01T10:00:00Z)
+      - description (optional): The Unavailability's description (max 250 characters; cannot be empty)"""
+    body = _body({"person": person, "description": description, "starts_at": starts_at, "ends_at": ends_at}, None, (), keep=())
+    return await _request("POST", "/rotas/unavailability", None, body)
 
 @tool("rotas", "DELETE")
 async def rotas_delete_unavailability(id: int) -> Any:
@@ -1681,68 +2211,133 @@ async def smallgroups_list_roles(page: int | None = None, per_page: int | None =
     return await _request("GET", "/smallgroups/roles", {"page": page, "per_page": per_page})
 
 @tool("smallgroups", "POST")
-async def smallgroups_create_cluster(name: str) -> Any:
+async def smallgroups_create_cluster(
+    name: Annotated[str, Field(description="Name (name) - REQUIRED. The Cluster's name. (max 50 characters; cannot be empty)")],
+) -> Any:
     """Create a cluster. Create a cluster with the provided settings.
-    name (required): The Cluster's name."""
-    return await _request("POST", "/smallgroups/clusters", None, _body({"name": name}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - name (required): The Cluster's name (max 50 characters; cannot be empty)"""
+    body = _body({"name": name}, None, (), keep=())
+    return await _request("POST", "/smallgroups/clusters", None, body)
 
 @tool("smallgroups", "POST")
-async def smallgroups_create_group_note(id: int, content: str, pinned: bool | None = None, visible_to: Any | None = None) -> Any:
+async def smallgroups_create_group_note(
+    id: Annotated[int, Field(description="ID (id) - REQUIRED. ID of the group to add the note to. Find it with smallgroups_list_groups (use `q` to search).")],
+    content: Annotated[str, Field(description="Content (content) - REQUIRED. The content of the Note. (max 65535 characters; cannot be empty)")],
+    pinned: Annotated[bool | None, Field(description="Pinned (pinned) - Optional. Whether the Note should be pinned.")] = None,
+    visible_to: Annotated[dict[str, Any] | None, Field(description="Visible to (visible_to) - Optional. Object keys: ONE of these shapes: {just_me (one of true): The resource should only be visible to the current user} OR {user_group_ids (list of integer): List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to -> ChurchSuite user-group IDs. No list tool; copy them from an existing record's visible_to, or ask a ChurchSuite admin.}")] = None,
+) -> Any:
     """Create a group note. Create a Note against a Group in the Small Groups module.
-    content (required): The content of the Note.
-    pinned: Whether the Note should be pinned.
-    visible_to: Object, one of these shapes: {just_me: must be true} OR {user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to."""
-    return await _request("POST", f"/smallgroups/groups/{id}/notes", None, _body({"content": content, "pinned": pinned, "visible_to": visible_to}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - id (required): ID of the group to add the note to. Find it with smallgroups_list_groups (use `q` to search).
+      - content (required): The content of the Note (max 65535 characters; cannot be empty)
+      - pinned (optional): Whether the Note should be pinned
+      - visible_to (optional): Visible to"""
+    body = _body({"content": content, "pinned": pinned, "visible_to": visible_to}, None, (), keep=())
+    return await _request("POST", f"/smallgroups/groups/{id}/notes", None, body)
 
 @tool("smallgroups", "POST")
-async def smallgroups_create_member(group_id: int, person: dict[str, Any], joined_date: str, status: Literal["active", "pending"], privacy: dict[str, Any], role_ids: list[int] | None = None, send_email_confirmation: bool | None = None, override_capacity: bool | None = None) -> Any:
+async def smallgroups_create_member(
+    group_id: Annotated[int, Field(description="Group ID (group_id) - REQUIRED. The group ID the Member is being added to. HOW TO GET IT: Run smallgroups_list_groups and use the group `id`.")],
+    person: Annotated[dict[str, Any], Field(description="Person (person) - REQUIRED. The Members's person details. Object keys: {type (one of children_child/addressbook_contact, required): The person's type, indicating whether they are a Child or Contact -> 'addressbook_contact' for a Contact or 'children_child' for a Child.; id (integer, required): The Contact or Child's ID -> A Contact ID (addressbook_list_contacts) or Child ID (children_list_children), matching `type`.}")],
+    joined_date: Annotated[str, Field(description="Joined date (joined_date) - REQUIRED. Date the Member joined the group. (date as YYYY-MM-DD)")],
+    status: Annotated[Literal["active", "pending"], Field(description="Status (status) - REQUIRED. The status of the Member. (one of: active, pending)")],
+    privacy: Annotated[dict[str, Any], Field(description="Privacy (privacy) - REQUIRED. The Member's privacy settings. Object keys: {use_defaults (boolean, required): Use the Member's default privacy settings. If this is false `telephone_visible`, `mobile_visible` and `email_visible` must be set; telephone_visible (boolean): Telephone is visible; mobile_visible (boolean): Mobile is visible; email_visible (boolean): Email is visible}")],
+    role_ids: Annotated[list[int] | None, Field(description="Role IDs (role_ids) - Optional. List of role_ids for any roles being assigned to the Member. HOW TO GET IT: Run smallgroups_list_roles and use the role `id`s.")] = None,
+    send_email_confirmation: Annotated[bool | None, Field(description="Send email confirmation (send_email_confirmation) - Optional. Send the sign-up confirmation email to the Member you are adding and a sign-up notification to any existing members with the appropriate role.")] = None,
+    override_capacity: Annotated[bool | None, Field(description="Override capacity (override_capacity) - Optional. Override the capacity of the group if adding the Member will take the group over capacity.")] = None,
+) -> Any:
     """Create members. Create a member with the provided settings.
-    group_id (required): The group ID the Member is being added to.
-    person (required): The Members's person details. Keys: type, id.
-    joined_date (required): Date the Member joined the group.
-    status (required): The status of the Member.
-    privacy (required): The Member's privacy settings. Object keys: use_defaults (boolean, required): Use the Member's default privacy settings. If this is false `telephone_visible`, `mobile_visible` and `email_visible` must be set; telephone_visible (boolean): Telephone is visible; mobile_visible (boolean): Mobile is visible; email_visible (boolean): Email is visible.
-    role_ids: List of role_ids for any roles being assigned to the Member.
-    send_email_confirmation: Send the sign-up confirmation email to the Member you are adding and a sign-up notification to any existing members with the appropriate role.
-    override_capacity: Override the capacity of the group if adding the Member will take the group over capacity."""
-    return await _request("POST", "/smallgroups/members", None, _body({"group_id": group_id, "person": person, "joined_date": joined_date, "status": status, "privacy": privacy, "role_ids": role_ids, "send_email_confirmation": send_email_confirmation, "override_capacity": override_capacity}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - group_id (required): The group ID the Member is being added to -> Run smallgroups_list_groups and use the group `id`.
+      - person (required): The Members's person details
+      - joined_date (required): Date the Member joined the group (date as YYYY-MM-DD)
+      - status (required): The status of the Member (one of: active, pending)
+      - privacy (required): The Member's privacy settings
+      - role_ids (optional): List of role_ids for any roles being assigned to the Member -> Run smallgroups_list_roles and use the role `id`s.
+      - send_email_confirmation (optional): Send the sign-up confirmation email to the Member you are adding and a sign-up notification to any existing members with the appropriate role
+      - override_capacity (optional): Override the capacity of the group if adding the Member will take the group over capacity"""
+    body = _body({"group_id": group_id, "person": person, "role_ids": role_ids, "joined_date": joined_date, "status": status, "privacy": privacy, "send_email_confirmation": send_email_confirmation, "override_capacity": override_capacity}, None, (), keep=())
+    return await _request("POST", "/smallgroups/members", None, body)
 
 @tool("smallgroups", "POST")
-async def smallgroups_create_role(name: str, notify_signups: bool | None = None, flyer_visible: bool | None = None, my_visible: bool | None = None, my_edit: bool | None = None, my_attendance: bool | None = None) -> Any:
+async def smallgroups_create_role(
+    name: Annotated[str, Field(description="Name (name) - REQUIRED. The Role's name. (max 30 characters; cannot be empty)")],
+    notify_signups: Annotated[bool | None, Field(description="Notify signups (notify_signups) - Optional. Whether to receive an email for each Sign-Up.")] = None,
+    flyer_visible: Annotated[bool | None, Field(description="Flyer visible (flyer_visible) - Optional. Whether Members with this Role have their Contact details appear on the Group flyers.")] = None,
+    my_visible: Annotated[bool | None, Field(description="My visible (my_visible) - Optional. Whether the Role will show within the Group Members list of My ChurchSuite.")] = None,
+    my_edit: Annotated[bool | None, Field(description="My edit (my_edit) - Optional. Whether Members with this Role can edit the Group details and Member list through My ChurchSuite.")] = None,
+    my_attendance: Annotated[bool | None, Field(description="My attendance (my_attendance) - Optional. Whether Members with this Role can submit attendance data through My ChurchSuite.")] = None,
+) -> Any:
     """Create a role. Create a role with the provided settings.
-    name (required): The Role's name.
-    notify_signups: Whether to receive an email for each Sign-Up.
-    flyer_visible: Whether Members with this Role have their Contact details appear on the Group flyers.
-    my_visible: Whether the Role will show within the Group Members list of My ChurchSuite.
-    my_edit: Whether Members with this Role can edit the Group details and Member list through My ChurchSuite.
-    my_attendance: Whether Members with this Role can submit attendance data through My ChurchSuite."""
-    return await _request("POST", "/smallgroups/roles", None, _body({"name": name, "notify_signups": notify_signups, "flyer_visible": flyer_visible, "my_visible": my_visible, "my_edit": my_edit, "my_attendance": my_attendance}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - name (required): The Role's name (max 30 characters; cannot be empty)
+      - notify_signups (optional): Whether to receive an email for each Sign-Up
+      - flyer_visible (optional): Whether Members with this Role have their Contact details appear on the Group flyers
+      - my_visible (optional): Whether the Role will show within the Group Members list of My ChurchSuite
+      - my_edit (optional): Whether Members with this Role can edit the Group details and Member list through My ChurchSuite
+      - my_attendance (optional): Whether Members with this Role can submit attendance data through My ChurchSuite"""
+    body = _body({"name": name, "notify_signups": notify_signups, "flyer_visible": flyer_visible, "my_visible": my_visible, "my_edit": my_edit, "my_attendance": my_attendance}, None, (), keep=())
+    return await _request("POST", "/smallgroups/roles", None, body)
 
 @tool("smallgroups", "PUT")
-async def smallgroups_edit_cluster(id: int, name: str) -> Any:
+async def smallgroups_edit_cluster(
+    id: Annotated[int, Field(description="ID (id) - REQUIRED. ID of the cluster to change. Find it with smallgroups_list_clusters (use `q` to search) or the matching get tool.")],
+    name: Annotated[str, Field(description="Name (name) - REQUIRED. The Cluster's name. (max 50 characters; cannot be empty)")],
+) -> Any:
     """Update a cluster. Update a single cluster identified by ID.
-    name (required): The Cluster's name."""
-    return await _request("PUT", f"/smallgroups/clusters/{id}", None, _body({"name": name}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - id (required): ID of the cluster to change. Find it with smallgroups_list_clusters (use `q` to search) or the matching get tool.
+      - name (required): The Cluster's name (max 50 characters; cannot be empty)"""
+    body = _body({"name": name}, None, (), keep=())
+    return await _request("PUT", f"/smallgroups/clusters/{id}", None, body)
 
 @tool("smallgroups", "PUT")
-async def smallgroups_edit_member(id: int, role_ids: list[int], joined_date: str, status: Literal["active", "pending"], privacy: dict[str, Any]) -> Any:
+async def smallgroups_edit_member(
+    id: Annotated[int, Field(description="ID (id) - REQUIRED. ID of the member to change. Find it with smallgroups_list_members (use `q` to search) or the matching get tool.")],
+    role_ids: Annotated[list[int], Field(description="Role IDs (role_ids) - REQUIRED. List of role_ids for any Roles being assigned to the Member. HOW TO GET IT: Run smallgroups_list_roles and use the role `id`s.")],
+    joined_date: Annotated[str, Field(description="Joined date (joined_date) - REQUIRED. Date the Member joined the group. (date as YYYY-MM-DD)")],
+    status: Annotated[Literal["active", "pending"], Field(description="Status (status) - REQUIRED. The current status of the Member. (one of: active, pending)")],
+    privacy: Annotated[dict[str, Any], Field(description="Privacy (privacy) - REQUIRED. The Member's privacy settings. Object keys: {use_defaults (boolean, required): Use the Member's default privacy settings. If this is false `telephone_visible`, `mobile_visible` and `email_visible` must be set; telephone_visible (boolean): Telephone is visible; mobile_visible (boolean): Mobile is visible; email_visible (boolean): Email is visible}")],
+) -> Any:
     """Update a member. Update a single member identified by ID.
-    role_ids (required): List of role_ids for any Roles being assigned to the Member.
-    joined_date (required): Date the Member joined the group.
-    status (required): The current status of the Member.
-    privacy (required): The Member's privacy settings. Object keys: use_defaults (boolean, required): Use the Member's default privacy settings. If this is false `telephone_visible`, `mobile_visible` and `email_visible` must be set; telephone_visible (boolean): Telephone is visible; mobile_visible (boolean): Mobile is visible; email_visible (boolean): Email is visible."""
-    return await _request("PUT", f"/smallgroups/members/{id}", None, _body({"role_ids": role_ids, "joined_date": joined_date, "status": status, "privacy": privacy}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - id (required): ID of the member to change. Find it with smallgroups_list_members (use `q` to search) or the matching get tool.
+      - role_ids (required): List of role_ids for any Roles being assigned to the Member -> Run smallgroups_list_roles and use the role `id`s.
+      - joined_date (required): Date the Member joined the group (date as YYYY-MM-DD)
+      - status (required): The current status of the Member (one of: active, pending)
+      - privacy (required): The Member's privacy settings"""
+    body = _body({"role_ids": role_ids, "joined_date": joined_date, "status": status, "privacy": privacy}, None, (), keep=())
+    return await _request("PUT", f"/smallgroups/members/{id}", None, body)
 
 @tool("smallgroups", "PUT")
-async def smallgroups_edit_role(id: int, name: str, notify_signups: bool, flyer_visible: bool, my_visible: bool, my_edit: bool, my_attendance: bool) -> Any:
+async def smallgroups_edit_role(
+    id: Annotated[int, Field(description="ID (id) - REQUIRED. ID of the role to change. Find it with smallgroups_list_roles (use `q` to search) or the matching get tool.")],
+    name: Annotated[str, Field(description="Name (name) - REQUIRED. The Role's name. (max 30 characters; cannot be empty)")],
+    notify_signups: Annotated[bool, Field(description="Notify signups (notify_signups) - REQUIRED. Whether to receive an email for each Sign-Up.")],
+    flyer_visible: Annotated[bool, Field(description="Flyer visible (flyer_visible) - REQUIRED. Whether Members with this Role have their Contact details appear on the Group flyers.")],
+    my_visible: Annotated[bool, Field(description="My visible (my_visible) - REQUIRED. Whether the Role will show within the Group Members list of My ChurchSuite.")],
+    my_edit: Annotated[bool, Field(description="My edit (my_edit) - REQUIRED. Whether Members with this Role can edit the Group details and Member list through My ChurchSuite.")],
+    my_attendance: Annotated[bool, Field(description="My attendance (my_attendance) - REQUIRED. Whether Members with this Role can submit attendance data through My ChurchSuite.")],
+) -> Any:
     """Update a role. Update a single role identified by ID.
-    name (required): The Role's name.
-    notify_signups (required): Whether to receive an email for each Sign-Up.
-    flyer_visible (required): Whether Members with this Role have their Contact details appear on the Group flyers.
-    my_visible (required): Whether the Role will show within the Group Members list of My ChurchSuite.
-    my_edit (required): Whether Members with this Role can edit the Group details and Member list through My ChurchSuite.
-    my_attendance (required): Whether Members with this Role can submit attendance data through My ChurchSuite."""
-    return await _request("PUT", f"/smallgroups/roles/{id}", None, _body({"name": name, "notify_signups": notify_signups, "flyer_visible": flyer_visible, "my_visible": my_visible, "my_edit": my_edit, "my_attendance": my_attendance}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - id (required): ID of the role to change. Find it with smallgroups_list_roles (use `q` to search) or the matching get tool.
+      - name (required): The Role's name (max 30 characters; cannot be empty)
+      - notify_signups (required): Whether to receive an email for each Sign-Up
+      - flyer_visible (required): Whether Members with this Role have their Contact details appear on the Group flyers
+      - my_visible (required): Whether the Role will show within the Group Members list of My ChurchSuite
+      - my_edit (required): Whether Members with this Role can edit the Group details and Member list through My ChurchSuite
+      - my_attendance (required): Whether Members with this Role can submit attendance data through My ChurchSuite"""
+    body = _body({"name": name, "notify_signups": notify_signups, "flyer_visible": flyer_visible, "my_visible": my_visible, "my_edit": my_edit, "my_attendance": my_attendance}, None, (), keep=())
+    return await _request("PUT", f"/smallgroups/roles/{id}", None, body)
 
 @tool("smallgroups", "DELETE")
 async def smallgroups_delete_cluster(id: int) -> Any:
@@ -1755,23 +2350,42 @@ async def smallgroups_delete_member(id: int) -> Any:
     return await _request("DELETE", f"/smallgroups/members/{id}", None)
 
 @tool("smallgroups", "POST")
-async def smallgroups_create_label(name: str, colour: Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"], options: list[str], multiple_responses: bool, required: bool) -> Any:
+async def smallgroups_create_label(
+    name: Annotated[str, Field(description="Name (name) - REQUIRED. The Label's name. (max 50 characters; cannot be empty)")],
+    colour: Annotated[Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"], Field(description="Colour (colour) - REQUIRED. The Label's colour. (one of: blue, red, orange, green, purple, pink, brown, grey)")],
+    options: Annotated[list[str], Field(description="Options (options) - REQUIRED. List of options that belong to the Label.")],
+    multiple_responses: Annotated[bool, Field(description="Multiple responses (multiple_responses) - REQUIRED. Whether the Label can have multiple responses.")],
+    required: Annotated[bool, Field(description="Required (required) - REQUIRED. Whether the Label is required.")],
+) -> Any:
     """Create a label. Create a label with the provided settings.
-    name (required): The Label's name (1-50 chars).
-    colour (required): The Label's colour.
-    options (required): List of options that belong to the Label (each 1-50 chars).
-    multiple_responses (required): Whether the Label can have multiple responses.
-    required (required): Whether the Label is required."""
-    return await _request("POST", "/smallgroups/labels", None, _body({"name": name, "colour": colour, "options": options, "multiple_responses": multiple_responses, "required": required}, None, ()))
+    
+    WHAT YOU NEED TO PROVIDE
+      - name (required): The Label's name (max 50 characters; cannot be empty)
+      - colour (required): The Label's colour (one of: blue, red, orange, green, purple, pink, brown, grey)
+      - options (required): List of options that belong to the Label
+      - multiple_responses (required): Whether the Label can have multiple responses
+      - required (required): Whether the Label is required"""
+    body = _body({"name": name, "colour": colour, "options": options, "multiple_responses": multiple_responses, "required": required}, None, (), keep=())
+    return await _request("POST", "/smallgroups/labels", None, body)
 
 @tool("smallgroups", "PUT")
-async def smallgroups_edit_label(id: int, name: str | None = None, colour: Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"] | None = None, multiple_responses: bool | None = None, required: bool | None = None) -> Any:
-    """Update a label. Update a single label identified by ID. (Options cannot be changed through this endpoint.)
-    name: The Label's name (1-50 chars).
-    colour: The Label's colour.
-    multiple_responses: Whether the Label can have multiple responses.
-    required: Whether the Label is required."""
-    return await _request("PUT", f"/smallgroups/labels/{id}", None, _body({"name": name, "colour": colour, "multiple_responses": multiple_responses, "required": required}, None, ()))
+async def smallgroups_edit_label(
+    id: Annotated[int, Field(description="ID (id) - REQUIRED. ID of the label to change. Find it with smallgroups_list_labels (use `q` to search) or the matching get tool.")],
+    name: Annotated[str | None, Field(description="Name (name) - Optional - leave out to keep the current value. The Label's name. (max 50 characters; cannot be empty)")] = None,
+    colour: Annotated[Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"] | None, Field(description="Colour (colour) - Optional - leave out to keep the current value. The Label's colour. (one of: blue, red, orange, green, purple, pink, brown, grey)")] = None,
+    multiple_responses: Annotated[bool | None, Field(description="Multiple responses (multiple_responses) - Optional - leave out to keep the current value. Whether the Label can have multiple responses.")] = None,
+    required: Annotated[bool | None, Field(description="Required (required) - Optional - leave out to keep the current value. Whether the Label is required.")] = None,
+) -> Any:
+    """Update a label. Update a single label identified by ID.
+    
+    WHAT YOU NEED TO PROVIDE
+      - id (required): ID of the label to change. Find it with smallgroups_list_labels (use `q` to search) or the matching get tool.
+      - name (optional): The Label's name (max 50 characters; cannot be empty)
+      - colour (optional): The Label's colour (one of: blue, red, orange, green, purple, pink, brown, grey)
+      - multiple_responses (optional): Whether the Label can have multiple responses
+      - required (optional): Whether the Label is required"""
+    body = _body({"name": name, "colour": colour, "multiple_responses": multiple_responses, "required": required}, None, (), keep=())
+    return await _request("PUT", f"/smallgroups/labels/{id}", None, body)
 
 @tool("smallgroups", "DELETE")
 async def smallgroups_delete_label(id: int) -> Any:
