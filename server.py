@@ -29,8 +29,9 @@ Server config (env):
                                  Defaults to one derived from the client secret.
       FASTMCP_HOME               optional. Where encrypted login sessions are stored. Put this on
                                  persistent disk, or everyone must sign in again after a redeploy.
-      CHURCHSUITE_TOKEN_AUTH_METHOD  optional. "client_secret_basic" (default) or
-                                 "client_secret_post", if ChurchSuite rejects the default.
+      CHURCHSUITE_FORWARD_RESOURCE  optional. "true" sends the OAuth "resource" parameter to
+                                 ChurchSuite (default false: it can break their consent page)
+      CHURCHSUITE_FORWARD_PKCE   optional. "false" stops sending PKCE to ChurchSuite (default true)
       CHURCHSUITE_MODULES        comma-separated subset to enable (default: all eight)
       CHURCHSUITE_READ_ONLY      "true" hides every POST/PUT/DELETE tool and requests only
                                  the .read scopes (default: false)
@@ -39,6 +40,7 @@ Server config (env):
       CHURCHSUITE_API_BASE       (default https://api.churchsuite.com/v2)
       CHURCHSUITE_AUTHORIZE_URL  (default https://login.churchsuite.com/oauth2/authorize)
       CHURCHSUITE_TOKEN_URL      (default https://login.churchsuite.com/oauth2/token)
+      CHURCHSUITE_REVOKE_URL     (default https://login.churchsuite.com/oauth2/revoke)
       HOST / PORT                bind address for HTTP mode (default 0.0.0.0 / 8000)
 
 Always serve this over HTTPS: the secret travels in the Authorization header.
@@ -72,6 +74,7 @@ READ_ONLY = os.environ.get("CHURCHSUITE_READ_ONLY", "").strip().lower() in ("1",
 API_BASE = os.environ.get("CHURCHSUITE_API_BASE", "https://api.churchsuite.com/v2").rstrip("/")
 TOKEN_URL = os.environ.get("CHURCHSUITE_TOKEN_URL", "https://login.churchsuite.com/oauth2/token")
 AUTHORIZE_URL = os.environ.get("CHURCHSUITE_AUTHORIZE_URL", "https://login.churchsuite.com/oauth2/authorize")
+REVOKE_URL = os.environ.get("CHURCHSUITE_REVOKE_URL", "https://login.churchsuite.com/oauth2/revoke")
 # ChurchSuite reads the clock time of calendar event starts_at/ends_at as the ACCOUNT'S local time and
 # ignores any "Z" or offset, but returns true UTC. Tested 19-Oct-2026: sending 2026-10-20T10:00:00Z gave
 # an event at 10:00 NZ time (returned as 2026-10-19T21:00:00Z). Set this to the account's timezone.
@@ -90,6 +93,11 @@ def _default_scope() -> str:
 SCOPE = os.environ.get("CHURCHSUITE_SCOPE") or _default_scope()
 if "user" not in SCOPE.split():
     SCOPE += " user"  # needed to check who is signed in (GET /account/users/current)
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    value = os.environ.get(name, "").strip().lower()
+    return default if not value else value in ("1", "true", "yes")
 
 
 def _required_env(name: str) -> str:
@@ -147,12 +155,18 @@ auth = OAuthProxy(
     upstream_token_endpoint=TOKEN_URL,
     upstream_client_id=_required_env("CHURCHSUITE_CLIENT_ID"),
     upstream_client_secret=_required_env("CHURCHSUITE_CLIENT_SECRET"),
+    upstream_revocation_endpoint=REVOKE_URL,  # so signing out revokes the ChurchSuite token too
     token_verifier=ChurchSuiteTokenVerifier(),
     base_url=_required_env("PUBLIC_BASE_URL").rstrip("/"),
     valid_scopes=SCOPE.split(),
     extra_authorize_params={"scope": SCOPE},  # always ask ChurchSuite for exactly these scopes
     jwt_signing_key=os.environ.get("JWT_SIGNING_KEY") or None,
-    token_endpoint_auth_method=os.environ.get("CHURCHSUITE_TOKEN_AUTH_METHOD") or None,
+    # ChurchSuite's discovery document lists client_secret_basic as the only supported method.
+    token_endpoint_auth_method="client_secret_basic",
+    # ChurchSuite doesn't document the RFC 8707 "resource" parameter; sending it can break their
+    # consent page, so it is off by default. PKCE is on by default and can be switched off.
+    forward_resource=_env_flag("CHURCHSUITE_FORWARD_RESOURCE", False),
+    forward_pkce=_env_flag("CHURCHSUITE_FORWARD_PKCE", True),
 )
 ALLOWED_PREFIXES = tuple(f"/{m}/" for m in ENABLED)
 
