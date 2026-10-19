@@ -1,5 +1,5 @@
 """
-MCP server for ChurchSuite (Core API v2, spec 2.109.0).
+MCP server for ChurchSuite (Core API v2, spec 2.112.3).
 
 Modules (8): attendance, addressbook, calendar, children, network, planning, rotas, smallgroups.
 Every GET, POST, PUT and DELETE endpoint in those modules is exposed as a tool, named
@@ -320,7 +320,7 @@ async def addressbook_list_contacts(page: int | None = None, per_page: int | Non
     """List contacts. Returns a list of contacts.
     site_ids: Filter records to those matching values in the provided array. This filter uses the logical OR operator.
     status: Filter records by the provided status.
-    q: Filter records with a fuzzy string match against the following properties: first_name, last_name, formal_name, email, telephone, mobile, address, job…
+    q: Filter records with a fuzzy string match against the following properties: first_name, last_name, formal_name, email, telephone, mobile, address, job, employer.
     tag_ids: Filter records to those matching values in the provided array. This filter uses the logical OR operator.
     name_visible: Filter records to those matching marked as having their name visible in My ChurchSuite.
     address_visible: Filter records to those matching marked as having their address visible in My ChurchSuite.
@@ -375,17 +375,19 @@ async def addressbook_list_form_responses(page: int | None = None, per_page: int
     return await _request("GET", "/addressbook/form_responses", {"page": page, "per_page": per_page, "form_ids[]": form_ids, "statuses[]": statuses, "q": q, "has_linked_resource": has_linked_resource, "invite_response": invite_response})
 
 @tool("addressbook", "GET")
-async def addressbook_list_key_date_resources(page: int | None = None, per_page: int | None = None, key_date_ids: list[int] | None = None, contact_ids: list[int] | None = None) -> Any:
+async def addressbook_list_key_date_resources(page: int | None = None, per_page: int | None = None, key_date_ids: list[int] | None = None, contact_ids: list[int] | None = None, order_by: Literal["created_at:asc", "created_at:desc", "date:asc", "date:desc", "id:asc", "id:desc", "modified_at:asc", "modified_at:desc"] | None = None) -> Any:
     """List key date resources. Returns a list of key date resources, optionally filtered by key date or contact ID. A key date resource records an instance of a key date for a contact on a given date.
     key_date_ids: Filter records to those matching values in the provided array. This filter uses the logical OR operator.
-    contact_ids: Filter records to those matching values in the provided array. This filter uses the logical OR operator."""
-    return await _request("GET", "/addressbook/key_date_resources", {"page": page, "per_page": per_page, "key_date_ids[]": key_date_ids, "contact_ids[]": contact_ids})
+    contact_ids: Filter records to those matching values in the provided array. This filter uses the logical OR operator.
+    order_by: Order records by the specified field and sort direction."""
+    return await _request("GET", "/addressbook/key_date_resources", {"page": page, "per_page": per_page, "key_date_ids[]": key_date_ids, "contact_ids[]": contact_ids, "order_by": order_by})
 
 @tool("addressbook", "GET")
-async def addressbook_list_key_dates(page: int | None = None, per_page: int | None = None, q: str | None = None) -> Any:
+async def addressbook_list_key_dates(page: int | None = None, per_page: int | None = None, q: str | None = None, order_by: Literal["created_at:asc", "created_at:desc", "id:asc", "id:desc", "modified_at:asc", "modified_at:desc", "name:asc", "name:desc"] | None = None) -> Any:
     """List key dates. Returns a list of key dates, sorted alphabetically by name.
-    q: Filter records with a fuzzy string match against the following properties: name."""
-    return await _request("GET", "/addressbook/key_dates", {"page": page, "per_page": per_page, "q": q})
+    q: Filter records with a fuzzy string match against the following properties: name.
+    order_by: Order records by the specified field and sort direction."""
+    return await _request("GET", "/addressbook/key_dates", {"page": page, "per_page": per_page, "q": q, "order_by": order_by})
 
 @tool("addressbook", "GET")
 async def addressbook_list_tag_categories() -> Any:
@@ -400,10 +402,11 @@ async def addressbook_list_tag_resources(page: int | None = None, per_page: int 
     return await _request("GET", "/addressbook/tag_resources", {"page": page, "per_page": per_page, "contact_ids[]": contact_ids, "tag_ids[]": tag_ids})
 
 @tool("addressbook", "GET")
-async def addressbook_list_tags(page: int | None = None, per_page: int | None = None, q: str | None = None) -> Any:
+async def addressbook_list_tags(page: int | None = None, per_page: int | None = None, q: str | None = None, order_by: Literal["created_at:asc", "created_at:desc", "id:asc", "id:desc", "modified_at:asc", "modified_at:desc", "name:asc", "name:desc"] | None = None) -> Any:
     """List tags. Returns a list of tags, sorted alphabetically by name.
-    q: Filter records with a fuzzy string match against the following properties: name."""
-    return await _request("GET", "/addressbook/tags", {"page": page, "per_page": per_page, "q": q})
+    q: Filter records with a fuzzy string match against the following properties: name.
+    order_by: Order records by the specified field and sort direction."""
+    return await _request("GET", "/addressbook/tags", {"page": page, "per_page": per_page, "q": q, "order_by": order_by})
 
 @tool("addressbook", "POST")
 async def addressbook_create_contact(first_name: str, last_name: str, all_sites: bool, site_ids: list[int], middle_name: str | None = None, title: str | None = None, formal_name: str | None = None, former_name: str | None = None, email: str | None = None, mobile: str | None = None, telephone: str | None = None, address: dict[str, Any] | None = None, sex: Literal["female", "male"] | None = None, date_of_birth: str | None = None, marital_status: Literal["single", "married", "engaged", "partnered", "separated", "divorced", "widowed"] | None = None, spouse_id: int | None = None, job: str | None = None, employer: str | None = None, work_telephone: str | None = None, custom_fields: list[Any] | None = None, communication: dict[str, Any] | None = None, login: dict[str, Any] | None = None, privacy: dict[str, Any] | None = None) -> Any:
@@ -411,7 +414,7 @@ async def addressbook_create_contact(first_name: str, last_name: str, all_sites:
     first_name (required): The first name of the Contact.
     last_name (required): The last name of the Contact.
     all_sites (required): Whether the Contact belongs to All Sites.
-    site_ids (required): An array of Site IDs that the Contact belongs to. If `all_sites` is `true`, this will be overridden. You are only able to add site IDs for sites you…
+    site_ids (required): An array of Site IDs that the Contact belongs to. If `all_sites` is `true`, this will be overridden. You are only able to add site IDs for sites you have the relevant permission for.
     middle_name: The middle name of the Contact.
     title: The title of the Contact.
     formal_name: The formal name of the Contact.
@@ -419,7 +422,7 @@ async def addressbook_create_contact(first_name: str, last_name: str, all_sites:
     email: The Contact's email address.
     mobile: The Contact's mobile number.
     telephone: The Contact's telephone number.
-    address: A street Address. Keys: line_1, line_2, line_3, city, county, country, postcode.
+    address: A street Address. Object keys: line_1 (string): The first line of the Address; line_2 (string): The second line of the Address; line_3 (string): The third line of the Address; city (string): The city of the Address; county (string): The county of the Address; country (string): The country of the Address, in ISO3166 alpha 2 format; postcode (string): The postcode of the Address.
     sex: The sex of the Contact.
     date_of_birth: The Contact's date of birth.
     marital_status: The Contact's marital status.
@@ -428,9 +431,9 @@ async def addressbook_create_contact(first_name: str, last_name: str, all_sites:
     employer: The employer of the Contact.
     work_telephone: The Contact's work telephone number.
     custom_fields: Custom Field responses for this resource
-    communication: The person's communication preferences. If no data is provided, the module default communication preferences will be used. Keys: general_email, gener…
+    communication: The person's communication preferences. If no data is provided, the module default communication preferences will be used. Object keys: general_email (boolean, required): Whether this person has consented to receiving general emails; general_sms (boolean, required): Whether this person has consented to receiving general SMS messages; phone (boolean, required): Whether this person has consented to receiving phone calls; post (boolean, required): Whether this person has consented to receiving post; rota_email (boolean, required): Whether this person has consented to receiving rota emails; rota_sms (boolean, required): Whether this person has consented to receiving rota SMS messages.
     login: My ChurchSuite/CharitySuite login information. Keys: enabled, invited.
-    privacy: Add the Contact's privacy settings. If no data is provided, the default privacy settings will be used. Keys: name_visible, address_visible, mobile_vi…"""
+    privacy: Add the Contact's privacy settings. If no data is provided, the default privacy settings will be used. Object keys: name_visible (boolean, required): Whether the Contact's name is visible in My; address_visible (boolean, required): Whether the Contact's address is visible in My. This will only be respected if name_visible is true, else it will not be visible; mobile_visible (boolean, required): Whether the Contact's mobile is visible in My. This will only be respected if name_visible is true, else it will not be visible; email_visible (boolean, required): Whether the Contact's email is visible in My. This will only be respected if name_visible is true, else it will not be visible; telephone_visible (boolean, required): Whether the Contact's mobile is visible in My. This will only be respected if name_visible is true, else it will not be visible."""
     return await _request("POST", "/addressbook/contacts", None, _body({"first_name": first_name, "last_name": last_name, "all_sites": all_sites, "site_ids": site_ids, "middle_name": middle_name, "title": title, "formal_name": formal_name, "former_name": former_name, "email": email, "mobile": mobile, "telephone": telephone, "address": address, "sex": sex, "date_of_birth": date_of_birth, "marital_status": marital_status, "spouse_id": spouse_id, "job": job, "employer": employer, "work_telephone": work_telephone, "custom_fields": custom_fields, "communication": communication, "login": login, "privacy": privacy}, None, ()))
 
 @tool("addressbook", "POST")
@@ -438,7 +441,7 @@ async def addressbook_create_contact_note(id: int, content: str, pinned: bool | 
     """Create a contact note. Create a Note against a Contact in the Address Book module.
     content (required): The content of the Note.
     pinned: Whether the Note should be pinned.
-    visible_to: """
+    visible_to: Object, one of these shapes: {just_me: must be true} OR {user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to."""
     return await _request("POST", f"/addressbook/contacts/{id}/notes", None, _body({"content": content, "pinned": pinned, "visible_to": visible_to}, None, ()))
 
 @tool("addressbook", "POST")
@@ -446,9 +449,9 @@ async def addressbook_create_flow_stage(flow_id: int, name: str, due_interval: i
     """Create a flow stage. Create a stage for a flow.
     flow_id (required): The Flow ID the Stage belongs to.
     name (required): The Stage's name.
-    due_interval (required): The number of days, weeks or months used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when…
-    due_period (required): The due period used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed fr…
-    due_from (required): The relative point used for tracking a person linked to the Stage, either when they are first added to the flow or when they are processed from a pre…
+    due_interval (required): The number of days, weeks or months used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage.
+    due_period (required): The due period used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage.
+    due_from (required): The relative point used for tracking a person linked to the Stage, either when they are first added to the flow or when they are processed from a previous stage.
     instructions: The instructions for the Stage.
     assigned_user_id: The ID of the user automatically assigned to people in this stage, or null if no user is assigned.
     automate_time: The UTC time the Stage will automatically process any due or overdue people if it is automated, or null if it is not automated."""
@@ -467,7 +470,7 @@ async def addressbook_create_key_date(name: str, colour: Literal["blue", "red", 
     """Create a key date. Create a key date with the provided settings.
     name (required): The Key Date's name.
     colour (required): The Key Date's colour.
-    visible_to: """
+    visible_to: Object, one of these shapes: {just_me: must be true} OR {user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to."""
     return await _request("POST", "/addressbook/key_dates", None, _body({"name": name, "colour": colour, "visible_to": visible_to}, None, ()))
 
 @tool("addressbook", "POST")
@@ -487,8 +490,8 @@ async def addressbook_create_tag(name: str, is_smart: bool, category_id: int | N
     category_id: The Tag's Category ID. This sets the default colour of the Tag to the Category's colour.
     description: The description of the Tag.
     colour: The name of the colour of the Tag. If not specified, the Category colour will be used where applicable, falling back to 'blue'.
-    visible_to: 
-    pinned_icon: Pin this Tag by specifying an icon. Pinned tags give you a quick way to see your most important tags at a glance; they're displayed at the top of the…"""
+    visible_to: Object, one of these shapes: {just_me: must be true} OR {user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to.
+    pinned_icon: Pin this Tag by specifying an icon. Pinned tags give you a quick way to see your most important tags at a glance; they're displayed at the top of the page when viewing a person's profile."""
     return await _request("POST", "/addressbook/tags", None, _body({"name": name, "is_smart": is_smart, "category_id": category_id, "description": description, "colour": colour, "visible_to": visible_to, "pinned_icon": pinned_icon}, None, ()))
 
 @tool("addressbook", "POST")
@@ -510,7 +513,7 @@ async def addressbook_edit_contact(id: int, first_name: str | None = None, last_
     email: The Contact's email address.
     mobile: The Contact's mobile number.
     telephone: The Contact's telephone number.
-    address: Edit a street Address. Keys: line_1, line_2, line_3, city, county, country, postcode.
+    address: Edit a street Address. Object keys: line_1 (string, required): The first line of the Address; line_2 (string, required): The second line of the Address; line_3 (string, required): The third line of the Address; city (string, required): The city of the Address; county (string, required): The county of the Address; country (string or null, required): The country of the Address, in ISO3166 alpha 2 format; postcode (string, required): The postcode of the Address.
     sex: The sex of the Contact.
     date_of_birth: The Contact's date of birth.
     marital_status: The Contact's marital status.
@@ -519,11 +522,11 @@ async def addressbook_edit_contact(id: int, first_name: str | None = None, last_
     employer: The employer of the Contact.
     work_telephone: The Contact's work telephone number.
     custom_fields: Custom Field responses for this resource
-    communication: The person's communication preferences. Keys: general_email, general_sms, phone, post, rota_email, rota_sms.
+    communication: The person's communication preferences. Object keys: general_email (boolean, required): Whether this person has consented to receiving general emails; general_sms (boolean, required): Whether this person has consented to receiving general SMS messages; phone (boolean, required): Whether this person has consented to receiving phone calls; post (boolean, required): Whether this person has consented to receiving post; rota_email (boolean, required): Whether this person has consented to receiving rota emails; rota_sms (boolean, required): Whether this person has consented to receiving rota SMS messages.
     login: My ChurchSuite/CharitySuite login information. Keys: enabled, invited.
-    privacy: Edit the Contact's privacy settings Keys: name_visible, address_visible, mobile_visible, email_visible, telephone_visible.
+    privacy: Edit the Contact's privacy settings. Object keys: name_visible (boolean, required): Whether the Contact's name is visible in My; address_visible (boolean, required): Whether the Contact's address is visible in My. This will only be respected if name_visible is true, else it will not be visible; mobile_visible (boolean, required): Whether the Contact's mobile is visible in My. This will only be respected if name_visible is true, else it will not be visible; email_visible (boolean, required): Whether the Contact's email is visible in My. This will only be respected if name_visible is true, else it will not be visible; telephone_visible (boolean, required): Whether the Contact's mobile is visible in My. This will only be respected if name_visible is true, else it will not be visible.
     all_sites: Whether the Contact belongs to All Sites.
-    site_ids: An array of Site IDs that the Contact belongs to. If `all_sites` is `true`, this will be overridden. You are only able to add site IDs for sites you…
+    site_ids: An array of Site IDs that the Contact belongs to. If `all_sites` is `true`, this will be overridden. You are only able to add site IDs for sites you have the relevant permission for.
     set_null: names of nullable fields to clear (address, sex, date_of_birth, marital_status, spouse_id)."""
     return await _request("PUT", f"/addressbook/contacts/{id}", None, _body({"first_name": first_name, "last_name": last_name, "middle_name": middle_name, "title": title, "formal_name": formal_name, "former_name": former_name, "email": email, "mobile": mobile, "telephone": telephone, "address": address, "sex": sex, "date_of_birth": date_of_birth, "marital_status": marital_status, "spouse_id": spouse_id, "job": job, "employer": employer, "work_telephone": work_telephone, "custom_fields": custom_fields, "communication": communication, "login": login, "privacy": privacy, "all_sites": all_sites, "site_ids": site_ids}, set_null, ("address", "sex", "date_of_birth", "marital_status", "spouse_id", )))
 
@@ -532,9 +535,9 @@ async def addressbook_edit_flow_stage(id: int, name: str, instructions: str, due
     """Update a flow stage. Update a single stage identified by ID.
     name (required): The Stage's name.
     instructions (required): The instructions for the Stage.
-    due_interval (required): The number of days, weeks or months used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when…
-    due_period (required): The due period used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed fr…
-    due_from (required): The relative point used for tracking a person linked to the Stage, either when they are first added to the flow or when they are processed from a pre…
+    due_interval (required): The number of days, weeks or months used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage.
+    due_period (required): The due period used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage.
+    due_from (required): The relative point used for tracking a person linked to the Stage, either when they are first added to the flow or when they are processed from a previous stage.
     assigned_user_id (required): The ID of the user automatically assigned to people in this stage, or null if no user is assigned.
     automate_time (required): The UTC time the Stage will automatically process any due or overdue people if it is automated, or null if it is not automated."""
     return await _request("PUT", f"/addressbook/flow_stages/{id}", None, _body({"name": name, "instructions": instructions, "due_interval": due_interval, "due_period": due_period, "due_from": due_from, "assigned_user_id": assigned_user_id, "automate_time": automate_time}, None, (), keep=("assigned_user_id", "automate_time", )))
@@ -551,7 +554,7 @@ async def addressbook_edit_key_date(id: int, name: str, colour: Literal["blue", 
     """Update a key date. Update a single key date identified by ID.
     name (required): The Key Date's name.
     colour (required): The Key Date's colour.
-    visible_to (required): Who the resource is visible to. Null if there are no restrictions. If `just_me` is true, `user_group_ids` must be empty or not set. If `just_me` is f…"""
+    visible_to (required): Who the resource is visible to. Null if there are no restrictions. If `just_me` is true, `user_group_ids` must be empty or not set. If `just_me` is false, `user_group_ids` must contain at least one User Group ID. Object, one of these shapes: {just_me: must be false, user_group_ids: array of integer [required]} OR {just_me: must be true [required], user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to."""
     return await _request("PUT", f"/addressbook/key_dates/{id}", None, _body({"name": name, "colour": colour, "visible_to": visible_to}, None, (), keep=("visible_to", )))
 
 @tool("addressbook", "PUT")
@@ -568,7 +571,7 @@ async def addressbook_edit_tag(id: int, name: str, category_id: int | None, desc
     category_id (required): The Tag's Category ID.
     description (required): The description of the Tag.
     colour (required): The name of the colour of the Tag.
-    visible_to (required): Who the resource is visible to. Null if there are no restrictions. If `just_me` is true, `user_group_ids` must be empty or not set. If `just_me` is f…
+    visible_to (required): Who the resource is visible to. Null if there are no restrictions. If `just_me` is true, `user_group_ids` must be empty or not set. If `just_me` is false, `user_group_ids` must contain at least one User Group ID. Object, one of these shapes: {just_me: must be false, user_group_ids: array of integer [required]} OR {just_me: must be true [required], user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to.
     pinned_icon (required): Pin this Tag by specifying an icon. This will be displayed within the application."""
     return await _request("PUT", f"/addressbook/tags/{id}", None, _body({"name": name, "category_id": category_id, "description": description, "colour": colour, "visible_to": visible_to, "pinned_icon": pinned_icon}, None, (), keep=("category_id", "visible_to", "pinned_icon", )))
 
@@ -646,7 +649,7 @@ async def calendar_list_categories(page: int | None = None, per_page: int | None
     return await _request("GET", "/calendar/categories", {"page": page, "per_page": per_page, "status": status, "q": q})
 
 @tool("calendar", "GET")
-async def calendar_list_events(page: int | None = None, per_page: int | None = None, site_ids: list[int] | None = None, category_ids: list[int] | None = None, q: str | None = None, sequence_id: int | None = None, starts_after: str | None = None, starts_before: str | None = None, status: Literal["cancelled", "confirmed", "pending"] | None = None) -> Any:
+async def calendar_list_events(page: int | None = None, per_page: int | None = None, site_ids: list[int] | None = None, category_ids: list[int] | None = None, q: str | None = None, sequence_id: int | None = None, starts_after: str | None = None, starts_before: str | None = None, status: Literal["cancelled", "confirmed", "pending"] | None = None, order_by: Literal["created_at:asc", "created_at:desc", "date:asc", "date:desc", "id:asc", "id:desc", "modified_at:asc", "modified_at:desc", "name:asc", "name:desc"] | None = None) -> Any:
     """List events. Returns a list of events, sorted by starts_at date.
     site_ids: Filter records to those matching values in the provided array. This filter uses the logical OR operator.
     category_ids: Filter records to those matching values in the provided array. This filter uses the logical OR operator.
@@ -654,8 +657,9 @@ async def calendar_list_events(page: int | None = None, per_page: int | None = N
     sequence_id: Filter records by the provided value.
     starts_after: Only include records that start after this date.
     starts_before: Only include records that start before this date.
-    status: Filter records by the provided status."""
-    return await _request("GET", "/calendar/events", {"page": page, "per_page": per_page, "site_ids[]": site_ids, "category_ids[]": category_ids, "q": q, "sequence_id": sequence_id, "starts_after": starts_after, "starts_before": starts_before, "status": status})
+    status: Filter records by the provided status.
+    order_by: Order records by the specified field and sort direction."""
+    return await _request("GET", "/calendar/events", {"page": page, "per_page": per_page, "site_ids[]": site_ids, "category_ids[]": category_ids, "q": q, "sequence_id": sequence_id, "starts_after": starts_after, "starts_before": starts_before, "status": status, "order_by": order_by})
 
 @tool("calendar", "GET")
 async def calendar_list_invites(child_ids: list[int] | None = None, contact_ids: list[int] | None = None, event_ids: list[int] | None = None, statuses: list[Literal["accepted", "declined", "not_sent", "opened", "pending"]] | None = None, q: str | None = None, page: int | None = None, per_page: int | None = None) -> Any:
@@ -702,22 +706,49 @@ async def calendar_create_category(name: str, color: str, brand_id: int) -> Any:
     return await _request("POST", "/calendar/categories", None, _body({"name": name, "color": color, "brand_id": brand_id}, None, ()))
 
 @tool("calendar", "POST")
-async def calendar_create_event() -> Any:
-    """Create an event. Create an event with the provided settings."""
-    return await _request("POST", "/calendar/events", None, _body({}, None, ()))
+async def calendar_create_event(name: str, starts_at: str, ends_at: str, status: Literal["confirmed", "cancelled", "pending"], category_id: int, description: str | None = None, sequence_id: int | None = None, all_sites: Literal[True] | None = None, site_ids: list[int] | None = None) -> Any:
+    """Create an event. Create an event with the provided settings.
+    name (required): The Event's name (1-50 chars).
+    starts_at (required): Date and time the Event starts, ISO 8601, e.g. 2018-01-01T10:00:00Z.
+    ends_at (required): Date and time the Event ends, ISO 8601, e.g. 2018-01-01T11:00:00Z.
+    status (required): The current status of the Event: confirmed, cancelled or pending.
+    category_id (required): The Event's category ID.
+    description: The description of the Event.
+    sequence_id: If the Event is part of a sequence, the sequence ID from an existing Event in the sequence.
+    all_sites: Pass true if the Event belongs to All Sites. Use this OR site_ids, not both.
+    site_ids: List of all site IDs the Event belongs to. Use this OR all_sites, not both."""
+    if all_sites is not None and site_ids is not None:
+        raise ValueError("Pass either all_sites=true or site_ids, not both")
+    return await _request("POST", "/calendar/events", None, _body({"name": name, "starts_at": starts_at, "ends_at": ends_at, "status": status, "category_id": category_id, "description": description, "sequence_id": sequence_id, "all_sites": all_sites, "site_ids": site_ids}, None, ()))
 
 @tool("calendar", "POST")
 async def calendar_create_event_note(id: int, content: str, pinned: bool | None = None, visible_to: Any | None = None) -> Any:
     """Create an event note. Create a Note against an Event in the Calendar module.
     content (required): The content of the Note.
     pinned: Whether the Note should be pinned.
-    visible_to: """
+    visible_to: Object, one of these shapes: {just_me: must be true} OR {user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to."""
     return await _request("POST", f"/calendar/events/{id}/notes", None, _body({"content": content, "pinned": pinned, "visible_to": visible_to}, None, ()))
 
 @tool("calendar", "POST")
-async def calendar_create_signup() -> Any:
-    """Create a sign-up. Create a sign-up with the provided settings."""
-    return await _request("POST", "/calendar/signups", None, _body({}, None, ()))
+async def calendar_create_signup(event_id: int, person: dict[str, Any] | None = None, first_name: str | None = None, last_name: str | None = None, ticket_id: int | None = None, email: str | None = None, mobile: str | None = None, notes: str | None = None, paid_amount: int | None = None, question_responses: list[dict[str, Any]] | None = None, send_confirmation: bool | None = None, override_capacity: bool | None = None) -> Any:
+    """Create a sign-up. Create a sign-up with the provided settings. Two forms: (a) linked to a ChurchSuite person: pass person; (b) not linked: pass first_name and last_name (do not pass person).
+    event_id (required): The Event ID the Sign-Up is linked to.
+    person: Link to a ChurchSuite person. Keys: type ("addressbook_contact" or "children_child"), id. Required unless first_name and last_name are given.
+    first_name: The Sign-Up's first name (1-50 chars). Required with last_name when person is not given.
+    last_name: The Sign-Up's last name (1-50 chars). Required with first_name when person is not given.
+    ticket_id: The Ticket ID the Sign-Up is linked to. Required if the Event has tickets.
+    email: The Sign-Up's email address (max 100). If omitted and linked to a Contact or Child, theirs is used.
+    mobile: The Sign-Up's mobile number (max 20). If omitted and linked to a Contact or Child, theirs is used.
+    notes: The Sign-Up's notes (max 65535).
+    paid_amount: Amount paid in the smallest currency unit (pence/cents). Required if the Event has tickets.
+    question_responses: Items of {question_id: int, question_type, value}. question_type "checkboxes" takes value as a list of strings; "date", "email", "paragraph", "text", "phone", "radios", "select" take a string value.
+    send_confirmation: Whether to send a confirmation email to the Sign-Up.
+    override_capacity: Whether to override the Event's capacity if this Sign-Up would exceed it."""
+    if person is not None and (first_name is not None or last_name is not None):
+        raise ValueError("Pass either person, or first_name and last_name, not both")
+    if person is None and (first_name is None or last_name is None):
+        raise ValueError("Pass either person, or both first_name and last_name")
+    return await _request("POST", "/calendar/signups", None, _body({"event_id": event_id, "person": person, "first_name": first_name, "last_name": last_name, "ticket_id": ticket_id, "email": email, "mobile": mobile, "notes": notes, "paid_amount": paid_amount, "question_responses": question_responses, "send_confirmation": send_confirmation, "override_capacity": override_capacity}, None, ()))
 
 @tool("calendar", "PUT")
 async def calendar_edit_category(id: int, name: str, color: str, brand_id: int) -> Any:
@@ -728,14 +759,39 @@ async def calendar_edit_category(id: int, name: str, color: str, brand_id: int) 
     return await _request("PUT", f"/calendar/categories/{id}", None, _body({"name": name, "color": color, "brand_id": brand_id}, None, ()))
 
 @tool("calendar", "PUT")
-async def calendar_edit_event(id: int) -> Any:
-    """Update an event. Update a single event identified by ID."""
-    return await _request("PUT", f"/calendar/events/{id}", None, _body({}, None, ()))
+async def calendar_edit_event(id: int, name: str | None = None, starts_at: str | None = None, ends_at: str | None = None, status: Literal["confirmed", "cancelled", "pending"] | None = None, description: str | None = None, category_id: int | None = None, sequence_id: int | None = None, all_sites: Literal[True] | None = None, site_ids: list[int] | None = None, set_null: list[str] | None = None) -> Any:
+    """Update an event. Update a single event identified by ID.
+    name: The Event's name (1-50 chars).
+    starts_at: Date and time the Event starts, ISO 8601, e.g. 2018-01-01T10:00:00Z.
+    ends_at: Date and time the Event ends, ISO 8601, e.g. 2018-01-01T11:00:00Z.
+    status: The current status of the Event: confirmed, cancelled or pending.
+    description: The description of the Event.
+    category_id: The Event's category ID.
+    sequence_id: If the Event is part of a sequence, the sequence ID from an existing Event in the sequence.
+    all_sites: Pass true if the Event belongs to All Sites. Use this OR site_ids, not both.
+    site_ids: List of all site IDs the Event belongs to. Use this OR all_sites, not both.
+    set_null: names of nullable fields to clear (sequence_id)."""
+    if all_sites is not None and site_ids is not None:
+        raise ValueError("Pass either all_sites=true or site_ids, not both")
+    return await _request("PUT", f"/calendar/events/{id}", None, _body({"name": name, "starts_at": starts_at, "ends_at": ends_at, "status": status, "description": description, "category_id": category_id, "sequence_id": sequence_id, "all_sites": all_sites, "site_ids": site_ids}, set_null, ("sequence_id", )))
 
 @tool("calendar", "PUT")
-async def calendar_edit_signup(id: int) -> Any:
-    """Update a sign-up. Update a single sign-up identified by ID."""
-    return await _request("PUT", f"/calendar/signups/{id}", None, _body({}, None, ()))
+async def calendar_edit_signup(id: int, email: str, mobile: str, notes: str, question_responses: list[dict[str, Any]], ticket_id: int | None = None, paid_amount: int | None = None, person: dict[str, Any] | None = None, first_name: str | None = None, last_name: str | None = None) -> Any:
+    """Update a sign-up. Update a single sign-up identified by ID. This is a full replacement: every field is sent. Two forms: (a) linked to a ChurchSuite person: pass person (first/last name are sent as null); (b) not linked: pass first_name and last_name (person is sent as null).
+    email (required): The Sign-Up's email address (max 100).
+    mobile (required): The Sign-Up's mobile number (max 20).
+    notes (required): The Sign-Up's notes (max 65535).
+    question_responses (required): Items of {question_id: int, question_type, value}; pass [] for none. question_type "checkboxes" takes value as a list of strings; "date", "email", "paragraph", "text", "phone", "radios", "select" take a string value.
+    ticket_id: The Ticket ID. Cannot be null if the Event has tickets; null otherwise.
+    paid_amount: Amount paid in the smallest currency unit. Cannot be null if the Event has tickets; null otherwise.
+    person: Link to a ChurchSuite person. Keys: type ("addressbook_contact" or "children_child"), id.
+    first_name: First name (1-50 chars) when the Sign-Up is not linked to a person.
+    last_name: Last name (1-50 chars) when the Sign-Up is not linked to a person."""
+    if person is not None and (first_name is not None or last_name is not None):
+        raise ValueError("Pass either person, or first_name and last_name, not both")
+    if person is None and (first_name is None or last_name is None):
+        raise ValueError("Pass either person, or both first_name and last_name")
+    return await _request("PUT", f"/calendar/signups/{id}", None, _body({"ticket_id": ticket_id, "person": person, "first_name": first_name, "last_name": last_name, "email": email, "mobile": mobile, "notes": notes, "paid_amount": paid_amount, "question_responses": question_responses}, None, (), keep=("ticket_id", "person", "first_name", "last_name", "paid_amount", )))
 
 @tool("calendar", "DELETE")
 async def calendar_delete_category(id: int, replacement_id: int) -> Any:
@@ -752,6 +808,30 @@ async def calendar_delete_event(id: int) -> Any:
 async def calendar_delete_signup(id: int) -> Any:
     """DESTRUCTIVE. Delete a sign-up. Delete a single sign-up identified by an ID."""
     return await _request("DELETE", f"/calendar/signups/{id}", None)
+
+@tool("calendar", "POST")
+async def calendar_create_label(name: str, colour: Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"], options: list[str], multiple_responses: bool, required: bool) -> Any:
+    """Create a label. Create a label with the provided settings.
+    name (required): The Label's name (1-50 chars).
+    colour (required): The Label's colour.
+    options (required): List of options that belong to the Label (each 1-50 chars).
+    multiple_responses (required): Whether the Label can have multiple responses.
+    required (required): Whether the Label is required."""
+    return await _request("POST", "/calendar/labels", None, _body({"name": name, "colour": colour, "options": options, "multiple_responses": multiple_responses, "required": required}, None, ()))
+
+@tool("calendar", "PUT")
+async def calendar_edit_label(id: int, name: str | None = None, colour: Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"] | None = None, multiple_responses: bool | None = None, required: bool | None = None) -> Any:
+    """Update a label. Update a single label identified by ID. (Options cannot be changed through this endpoint.)
+    name: The Label's name (1-50 chars).
+    colour: The Label's colour.
+    multiple_responses: Whether the Label can have multiple responses.
+    required: Whether the Label is required."""
+    return await _request("PUT", f"/calendar/labels/{id}", None, _body({"name": name, "colour": colour, "multiple_responses": multiple_responses, "required": required}, None, ()))
+
+@tool("calendar", "DELETE")
+async def calendar_delete_label(id: int) -> Any:
+    """DESTRUCTIVE. Delete a label. Delete a single label identified by ID. Label responses will be deleted from all events. Module settings that reference this label will be affected."""
+    return await _request("DELETE", f"/calendar/labels/{id}", None)
 
 
 
@@ -905,17 +985,19 @@ async def children_list_groups(page: int | None = None, per_page: int | None = N
     return await _request("GET", "/children/groups", {"page": page, "per_page": per_page, "group_setup_ids[]": group_setup_ids, "status": status, "q": q})
 
 @tool("children", "GET")
-async def children_list_key_date_resources(page: int | None = None, per_page: int | None = None, key_date_ids: list[int] | None = None, child_ids: list[int] | None = None) -> Any:
+async def children_list_key_date_resources(page: int | None = None, per_page: int | None = None, key_date_ids: list[int] | None = None, child_ids: list[int] | None = None, order_by: Literal["created_at:asc", "created_at:desc", "date:asc", "date:desc", "id:asc", "id:desc", "modified_at:asc", "modified_at:desc"] | None = None) -> Any:
     """List key date resources. Returns a list of key date resources, optionally filtered by key date or child ID. A key date resource records an instance of a key date for a child on a given date.
     key_date_ids: Filter records to those matching values in the provided array. This filter uses the logical OR operator.
-    child_ids: Filter records to those matching values in the provided array. This filter uses the logical OR operator."""
-    return await _request("GET", "/children/key_date_resources", {"page": page, "per_page": per_page, "key_date_ids[]": key_date_ids, "child_ids[]": child_ids})
+    child_ids: Filter records to those matching values in the provided array. This filter uses the logical OR operator.
+    order_by: Order records by the specified field and sort direction."""
+    return await _request("GET", "/children/key_date_resources", {"page": page, "per_page": per_page, "key_date_ids[]": key_date_ids, "child_ids[]": child_ids, "order_by": order_by})
 
 @tool("children", "GET")
-async def children_list_key_dates(page: int | None = None, per_page: int | None = None, q: str | None = None) -> Any:
+async def children_list_key_dates(page: int | None = None, per_page: int | None = None, q: str | None = None, order_by: Literal["created_at:asc", "created_at:desc", "id:asc", "id:desc", "modified_at:asc", "modified_at:desc", "name:asc", "name:desc"] | None = None) -> Any:
     """List key dates. Returns a list of key dates, sorted alphabetically by name.
-    q: Filter records with a fuzzy string match against the following properties: name."""
-    return await _request("GET", "/children/key_dates", {"page": page, "per_page": per_page, "q": q})
+    q: Filter records with a fuzzy string match against the following properties: name.
+    order_by: Order records by the specified field and sort direction."""
+    return await _request("GET", "/children/key_dates", {"page": page, "per_page": per_page, "q": q, "order_by": order_by})
 
 @tool("children", "GET")
 async def children_list_parent_carer_relationships(page: int | None = None, per_page: int | None = None, child_ids: list[int] | None = None) -> Any:
@@ -936,10 +1018,11 @@ async def children_list_tag_resources(page: int | None = None, per_page: int | N
     return await _request("GET", "/children/tag_resources", {"page": page, "per_page": per_page, "child_ids[]": child_ids, "tag_ids[]": tag_ids})
 
 @tool("children", "GET")
-async def children_list_tags(page: int | None = None, per_page: int | None = None, q: str | None = None) -> Any:
+async def children_list_tags(page: int | None = None, per_page: int | None = None, q: str | None = None, order_by: Literal["created_at:asc", "created_at:desc", "id:asc", "id:desc", "modified_at:asc", "modified_at:desc", "name:asc", "name:desc"] | None = None) -> Any:
     """List tags. Returns a list of tags, sorted alphabetically by name.
-    q: Filter records with a fuzzy string match against the following properties: name."""
-    return await _request("GET", "/children/tags", {"page": page, "per_page": per_page, "q": q})
+    q: Filter records with a fuzzy string match against the following properties: name.
+    order_by: Order records by the specified field and sort direction."""
+    return await _request("GET", "/children/tags", {"page": page, "per_page": per_page, "q": q, "order_by": order_by})
 
 @tool("children", "POST")
 async def children_create_child(first_name: str, last_name: str, all_sites: bool, site_ids: list[int], middle_name: str | None = None, formal_name: str | None = None, sex: Literal["female", "male"] | None = None, date_of_birth: str | None = None, mobile: str | None = None, email: str | None = None, address: dict[str, Any] | None = None, custom_fields: list[Any] | None = None, communication: dict[str, Any] | None = None, school: str | None = None, school_year_offset: int | None = None, medical_short: str | None = None, medical: str | None = None, doctor_details: str | None = None, additional_needs: str | None = None, additional_info: str | None = None, login: dict[str, Any] | None = None, privacy: dict[str, Any] | None = None) -> Any:
@@ -947,16 +1030,16 @@ async def children_create_child(first_name: str, last_name: str, all_sites: bool
     first_name (required): The first name of the Child.
     last_name (required): The last name of the Child.
     all_sites (required): Whether the Child belongs to All Sites.
-    site_ids (required): An array of Site IDs that the Child belongs to. If `all_sites` is `true`, this will be overridden. You are only able to add site IDs for sites you ha…
+    site_ids (required): An array of Site IDs that the Child belongs to. If `all_sites` is `true`, this will be overridden. You are only able to add site IDs for sites you have the relevant permission for.
     middle_name: The middle name of the Child.
     formal_name: The formal name of the Child.
     sex: The sex of the Child.
     date_of_birth: The Child's date of birth.
     mobile: The Child's mobile number.
     email: The Child's email address.
-    address: A street Address. Keys: line_1, line_2, line_3, city, county, country, postcode.
+    address: A street Address. Object keys: line_1 (string): The first line of the Address; line_2 (string): The second line of the Address; line_3 (string): The third line of the Address; city (string): The city of the Address; county (string): The county of the Address; country (string): The country of the Address, in ISO3166 alpha 2 format; postcode (string): The postcode of the Address.
     custom_fields: Custom Field responses for this resource
-    communication: The person's communication preferences. If no data is provided, the module default communication preferences will be used. Keys: general_email, gener…
+    communication: The person's communication preferences. If no data is provided, the module default communication preferences will be used. Object keys: general_email (boolean, required): Whether this person has consented to receiving general emails; general_sms (boolean, required): Whether this person has consented to receiving general SMS messages; phone (boolean, required): Whether this person has consented to receiving phone calls; post (boolean, required): Whether this person has consented to receiving post; rota_email (boolean, required): Whether this person has consented to receiving rota emails; rota_sms (boolean, required): Whether this person has consented to receiving rota SMS messages.
     school: The Child's school.
     school_year_offset: Adjusted school year value based on the Child's age.
     medical_short: Condensed medical information about the Child.
@@ -965,7 +1048,7 @@ async def children_create_child(first_name: str, last_name: str, all_sites: bool
     additional_needs: Any additional needs declared about the Child.
     additional_info: Additional information about the Child.
     login: My ChurchSuite/CharitySuite login information. Keys: enabled, invited.
-    privacy: The Child's privacy settings. If no data is provided, the default privacy settings will be used. Keys: name_visible, address_visible, mobile_visible,…"""
+    privacy: The Child's privacy settings. If no data is provided, the default privacy settings will be used. Object keys: name_visible (boolean, required): Whether the Child's name is visible in My; address_visible (boolean, required): Whether the Child's address is visible in My. This will only be respected if name_visible is true, else it will not be visible; mobile_visible (boolean, required): Whether the Child's mobile is visible in My. This will only be respected if name_visible is true, else it will not be visible; email_visible (boolean, required): Whether the Child's email is visible in My. This will only be respected if name_visible is true, else it will not be visible."""
     return await _request("POST", "/children/children", None, _body({"first_name": first_name, "last_name": last_name, "all_sites": all_sites, "site_ids": site_ids, "middle_name": middle_name, "formal_name": formal_name, "sex": sex, "date_of_birth": date_of_birth, "mobile": mobile, "email": email, "address": address, "custom_fields": custom_fields, "communication": communication, "school": school, "school_year_offset": school_year_offset, "medical_short": medical_short, "medical": medical, "doctor_details": doctor_details, "additional_needs": additional_needs, "additional_info": additional_info, "login": login, "privacy": privacy}, None, ()))
 
 @tool("children", "POST")
@@ -973,7 +1056,7 @@ async def children_create_child_note(id: int, content: str, pinned: bool | None 
     """Create a child note. Create a Note against a Child in the Children module.
     content (required): The content of the Note.
     pinned: Whether the Note should be pinned.
-    visible_to: """
+    visible_to: Object, one of these shapes: {just_me: must be true} OR {user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to."""
     return await _request("POST", f"/children/children/{id}/notes", None, _body({"content": content, "pinned": pinned, "visible_to": visible_to}, None, ()))
 
 @tool("children", "POST")
@@ -981,9 +1064,9 @@ async def children_create_flow_stage(flow_id: int, name: str, due_interval: int,
     """Create a flow stage. Create a stage for a flow.
     flow_id (required): The Flow ID the Stage belongs to.
     name (required): The Stage's name.
-    due_interval (required): The number of days, weeks or months used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when…
-    due_period (required): The due period used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed fr…
-    due_from (required): The relative point used for tracking a person linked to the Stage, either when they are first added to the flow or when they are processed from a pre…
+    due_interval (required): The number of days, weeks or months used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage.
+    due_period (required): The due period used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage.
+    due_from (required): The relative point used for tracking a person linked to the Stage, either when they are first added to the flow or when they are processed from a previous stage.
     instructions: The instructions for the Stage.
     assigned_user_id: The ID of the user automatically assigned to people in this stage, or null if no user is assigned.
     automate_time: The UTC time the Stage will automatically process any due or overdue people if it is automated, or null if it is not automated."""
@@ -1002,7 +1085,7 @@ async def children_create_key_date(name: str, colour: Literal["blue", "red", "or
     """Create a key date. Create a key date with the provided settings.
     name (required): The Key Date's name.
     colour (required): The Key Date's colour.
-    visible_to: """
+    visible_to: Object, one of these shapes: {just_me: must be true} OR {user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to."""
     return await _request("POST", "/children/key_dates", None, _body({"name": name, "colour": colour, "visible_to": visible_to}, None, ()))
 
 @tool("children", "POST")
@@ -1022,8 +1105,8 @@ async def children_create_tag(name: str, is_smart: bool, category_id: int | None
     category_id: The Tag's Category ID. This sets the default colour of the Tag to the Category's colour.
     description: The description of the Tag.
     colour: The name of the colour of the Tag. If not specified, the Category colour will be used where applicable, falling back to 'blue'.
-    visible_to: 
-    pinned_icon: Pin this Tag by specifying an icon. Pinned tags give you a quick way to see your most important tags at a glance; they're displayed at the top of the…"""
+    visible_to: Object, one of these shapes: {just_me: must be true} OR {user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to.
+    pinned_icon: Pin this Tag by specifying an icon. Pinned tags give you a quick way to see your most important tags at a glance; they're displayed at the top of the page when viewing a person's profile."""
     return await _request("POST", "/children/tags", None, _body({"name": name, "is_smart": is_smart, "category_id": category_id, "description": description, "colour": colour, "visible_to": visible_to, "pinned_icon": pinned_icon}, None, ()))
 
 @tool("children", "POST")
@@ -1044,9 +1127,9 @@ async def children_edit_child(id: int, first_name: str | None = None, middle_nam
     date_of_birth: The Child's date of birth.
     mobile: The Child's mobile number.
     email: The Child's email address.
-    address: Edit a street Address. Keys: line_1, line_2, line_3, city, county, country, postcode.
+    address: Edit a street Address. Object keys: line_1 (string, required): The first line of the Address; line_2 (string, required): The second line of the Address; line_3 (string, required): The third line of the Address; city (string, required): The city of the Address; county (string, required): The county of the Address; country (string or null, required): The country of the Address, in ISO3166 alpha 2 format; postcode (string, required): The postcode of the Address.
     custom_fields: Custom Field responses for this resource
-    communication: The person's communication preferences. Keys: general_email, general_sms, phone, post, rota_email, rota_sms.
+    communication: The person's communication preferences. Object keys: general_email (boolean, required): Whether this person has consented to receiving general emails; general_sms (boolean, required): Whether this person has consented to receiving general SMS messages; phone (boolean, required): Whether this person has consented to receiving phone calls; post (boolean, required): Whether this person has consented to receiving post; rota_email (boolean, required): Whether this person has consented to receiving rota emails; rota_sms (boolean, required): Whether this person has consented to receiving rota SMS messages.
     school: The Child's school.
     school_year_offset: Adjusted school year value based on the Child's age.
     medical_short: Condensed medical information about the Child.
@@ -1055,9 +1138,9 @@ async def children_edit_child(id: int, first_name: str | None = None, middle_nam
     additional_needs: Any additional needs declared about the Child.
     additional_info: Additional information about the Child.
     login: My ChurchSuite/CharitySuite login information. Keys: enabled, invited.
-    privacy: The Child's privacy settings Keys: name_visible, address_visible, mobile_visible, email_visible.
+    privacy: The Child's privacy settings. Object keys: name_visible (boolean, required): Whether the Child's name is visible in My; address_visible (boolean, required): Whether the Child's address is visible in My. This will only be respected if name_visible is true, else it will not be visible; mobile_visible (boolean, required): Whether the Child's mobile is visible in My. This will only be respected if name_visible is true, else it will not be visible; email_visible (boolean, required): Whether the Child's email is visible in My. This will only be respected if name_visible is true, else it will not be visible.
     all_sites: Whether the Child belongs to All Sites.
-    site_ids: An array of Site IDs that the Child belongs to. If `all_sites` is `true`, this will be overridden. You are only able to add site IDs for sites you ha…
+    site_ids: An array of Site IDs that the Child belongs to. If `all_sites` is `true`, this will be overridden. You are only able to add site IDs for sites you have the relevant permission for.
     set_null: names of nullable fields to clear (sex, date_of_birth, email, address)."""
     return await _request("PUT", f"/children/children/{id}", None, _body({"first_name": first_name, "middle_name": middle_name, "last_name": last_name, "formal_name": formal_name, "sex": sex, "date_of_birth": date_of_birth, "mobile": mobile, "email": email, "address": address, "custom_fields": custom_fields, "communication": communication, "school": school, "school_year_offset": school_year_offset, "medical_short": medical_short, "medical": medical, "doctor_details": doctor_details, "additional_needs": additional_needs, "additional_info": additional_info, "login": login, "privacy": privacy, "all_sites": all_sites, "site_ids": site_ids}, set_null, ("sex", "date_of_birth", "email", "address", )))
 
@@ -1066,9 +1149,9 @@ async def children_edit_flow_stage(id: int, name: str, instructions: str, due_in
     """Update a flow stage. Update a single stage identified by ID.
     name (required): The Stage's name.
     instructions (required): The instructions for the Stage.
-    due_interval (required): The number of days, weeks or months used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when…
-    due_period (required): The due period used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed fr…
-    due_from (required): The relative point used for tracking a person linked to the Stage, either when they are first added to the flow or when they are processed from a pre…
+    due_interval (required): The number of days, weeks or months used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage.
+    due_period (required): The due period used for tracking a person linked to the Stage, either relative to when they are first added to the flow or when they are processed from a previous stage.
+    due_from (required): The relative point used for tracking a person linked to the Stage, either when they are first added to the flow or when they are processed from a previous stage.
     assigned_user_id (required): The ID of the user automatically assigned to people in this stage, or null if no user is assigned.
     automate_time (required): The UTC time the Stage will automatically process any due or overdue people if it is automated, or null if it is not automated."""
     return await _request("PUT", f"/children/flow_stages/{id}", None, _body({"name": name, "instructions": instructions, "due_interval": due_interval, "due_period": due_period, "due_from": due_from, "assigned_user_id": assigned_user_id, "automate_time": automate_time}, None, (), keep=("assigned_user_id", "automate_time", )))
@@ -1085,7 +1168,7 @@ async def children_edit_key_date(id: int, name: str, colour: Literal["blue", "re
     """Update a key date. Update a single key date identified by ID.
     name (required): The Key Date's name.
     colour (required): The Key Date's colour.
-    visible_to (required): Who the resource is visible to. Null if there are no restrictions. If `just_me` is true, `user_group_ids` must be empty or not set. If `just_me` is f…"""
+    visible_to (required): Who the resource is visible to. Null if there are no restrictions. If `just_me` is true, `user_group_ids` must be empty or not set. If `just_me` is false, `user_group_ids` must contain at least one User Group ID. Object, one of these shapes: {just_me: must be false, user_group_ids: array of integer [required]} OR {just_me: must be true [required], user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to."""
     return await _request("PUT", f"/children/key_dates/{id}", None, _body({"name": name, "colour": colour, "visible_to": visible_to}, None, (), keep=("visible_to", )))
 
 @tool("children", "PUT")
@@ -1102,7 +1185,7 @@ async def children_edit_tag(id: int, name: str, category_id: int | None, descrip
     category_id (required): The Tag's Category ID.
     description (required): The description of the Tag.
     colour (required): The name of the colour of the Tag.
-    visible_to (required): Who the resource is visible to. Null if there are no restrictions. If `just_me` is true, `user_group_ids` must be empty or not set. If `just_me` is f…
+    visible_to (required): Who the resource is visible to. Null if there are no restrictions. If `just_me` is true, `user_group_ids` must be empty or not set. If `just_me` is false, `user_group_ids` must contain at least one User Group ID. Object, one of these shapes: {just_me: must be false, user_group_ids: array of integer [required]} OR {just_me: must be true [required], user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to.
     pinned_icon (required): Pin this Tag by specifying an icon. This will be displayed within the application."""
     return await _request("PUT", f"/children/tags/{id}", None, _body({"name": name, "category_id": category_id, "description": description, "colour": colour, "visible_to": visible_to, "pinned_icon": pinned_icon}, None, (), keep=("category_id", "visible_to", "pinned_icon", )))
 
@@ -1183,17 +1266,19 @@ async def network_list_custom_fields(page: int | None = None, per_page: int | No
     return await _request("GET", "/network/custom_fields", {"page": page, "per_page": per_page})
 
 @tool("network", "GET")
-async def network_list_key_date_resources(page: int | None = None, per_page: int | None = None, key_date_ids: list[int] | None = None, organisation_ids: list[int] | None = None) -> Any:
+async def network_list_key_date_resources(page: int | None = None, per_page: int | None = None, key_date_ids: list[int] | None = None, organisation_ids: list[int] | None = None, order_by: Literal["created_at:asc", "created_at:desc", "date:asc", "date:desc", "id:asc", "id:desc", "modified_at:asc", "modified_at:desc"] | None = None) -> Any:
     """List key date resources. Returns a list of key date resources, optionally filtered by key date or organisation ID. A key date resource records an instance of a key date for an organisation on a given date.
     key_date_ids: Filter records to those matching values in the provided array. This filter uses the logical OR operator.
-    organisation_ids: Filter records to those matching values in the provided array. This filter uses the logical OR operator."""
-    return await _request("GET", "/network/key_date_resources", {"page": page, "per_page": per_page, "key_date_ids[]": key_date_ids, "organisation_ids[]": organisation_ids})
+    organisation_ids: Filter records to those matching values in the provided array. This filter uses the logical OR operator.
+    order_by: Order records by the specified field and sort direction."""
+    return await _request("GET", "/network/key_date_resources", {"page": page, "per_page": per_page, "key_date_ids[]": key_date_ids, "organisation_ids[]": organisation_ids, "order_by": order_by})
 
 @tool("network", "GET")
-async def network_list_key_dates(page: int | None = None, per_page: int | None = None, q: str | None = None) -> Any:
+async def network_list_key_dates(page: int | None = None, per_page: int | None = None, q: str | None = None, order_by: Literal["created_at:asc", "created_at:desc", "id:asc", "id:desc", "modified_at:asc", "modified_at:desc", "name:asc", "name:desc"] | None = None) -> Any:
     """List key dates. Returns a list of key dates, sorted alphabetically by name.
-    q: Filter records with a fuzzy string match against the following properties: name."""
-    return await _request("GET", "/network/key_dates", {"page": page, "per_page": per_page, "q": q})
+    q: Filter records with a fuzzy string match against the following properties: name.
+    order_by: Order records by the specified field and sort direction."""
+    return await _request("GET", "/network/key_dates", {"page": page, "per_page": per_page, "q": q, "order_by": order_by})
 
 @tool("network", "GET")
 async def network_list_label_resources(page: int | None = None, per_page: int | None = None, label_ids: list[int] | None = None, organisation_ids: list[int] | None = None) -> Any:
@@ -1217,12 +1302,13 @@ async def network_list_members(page: int | None = None, per_page: int | None = N
     return await _request("GET", "/network/members", {"page": page, "per_page": per_page, "role_ids[]": role_ids, "organisation_ids[]": organisation_ids, "order_by": order_by})
 
 @tool("network", "GET")
-async def network_list_organisations(page: int | None = None, per_page: int | None = None, site_ids: list[int] | None = None, q: str | None = None, status: Literal["active", "archived"] | None = None) -> Any:
+async def network_list_organisations(page: int | None = None, per_page: int | None = None, site_ids: list[int] | None = None, q: str | None = None, status: Literal["active", "archived"] | None = None, order_by: Literal["created_at:asc", "created_at:desc", "id:asc", "id:desc", "modified_at:asc", "modified_at:desc", "name:asc", "name:desc"] | None = None) -> Any:
     """List organisations. Returns a list of organisation, sorted alphabetically by name.
     site_ids: Filter records to those matching values in the provided array. This filter uses the logical OR operator.
     q: Filter records with a fuzzy string match against the following properties: name, reference (if enabled), meeting address city.
-    status: Filter records by the provided status."""
-    return await _request("GET", "/network/organisations", {"page": page, "per_page": per_page, "site_ids[]": site_ids, "q": q, "status": status})
+    status: Filter records by the provided status.
+    order_by: Order records by the specified field and sort direction."""
+    return await _request("GET", "/network/organisations", {"page": page, "per_page": per_page, "site_ids[]": site_ids, "q": q, "status": status, "order_by": order_by})
 
 @tool("network", "GET")
 async def network_list_roles(page: int | None = None, per_page: int | None = None, q: str | None = None) -> Any:
@@ -1235,7 +1321,7 @@ async def network_create_key_date(name: str, colour: Literal["blue", "red", "ora
     """Create a key date. Create a key date with the provided settings.
     name (required): The Key Date's name.
     colour (required): The Key Date's colour.
-    visible_to: """
+    visible_to: Object, one of these shapes: {just_me: must be true} OR {user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to."""
     return await _request("POST", "/network/key_dates", None, _body({"name": name, "colour": colour, "visible_to": visible_to}, None, ()))
 
 @tool("network", "POST")
@@ -1252,7 +1338,7 @@ async def network_create_organisation_note(id: int, content: str, pinned: bool |
     """Create a organisation note. Create a Note against a Organisation in the Network module.
     content (required): The content of the Note.
     pinned: Whether the Note should be pinned.
-    visible_to: """
+    visible_to: Object, one of these shapes: {just_me: must be true} OR {user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to."""
     return await _request("POST", f"/network/organisations/{id}/notes", None, _body({"content": content, "pinned": pinned, "visible_to": visible_to}, None, ()))
 
 @tool("network", "PUT")
@@ -1260,7 +1346,7 @@ async def network_edit_key_date(id: int, name: str, colour: Literal["blue", "red
     """Update a key date. Update a single key date identified by ID.
     name (required): The Key Date's name.
     colour (required): The Key Date's colour.
-    visible_to (required): Who the resource is visible to. Null if there are no restrictions. If `just_me` is true, `user_group_ids` must be empty or not set. If `just_me` is f…"""
+    visible_to (required): Who the resource is visible to. Null if there are no restrictions. If `just_me` is true, `user_group_ids` must be empty or not set. If `just_me` is false, `user_group_ids` must contain at least one User Group ID. Object, one of these shapes: {just_me: must be false, user_group_ids: array of integer [required]} OR {just_me: must be true [required], user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to."""
     return await _request("PUT", f"/network/key_dates/{id}", None, _body({"name": name, "colour": colour, "visible_to": visible_to}, None, (), keep=("visible_to", )))
 
 @tool("network", "PUT")
@@ -1279,6 +1365,30 @@ async def network_delete_key_date(id: int) -> Any:
 async def network_delete_key_date_resource(id: int) -> Any:
     """DESTRUCTIVE. Delete a key date resource. Delete a single key date resource identified by an ID, removing an organisation from a key date."""
     return await _request("DELETE", f"/network/key_date_resources/{id}", None)
+
+@tool("network", "POST")
+async def network_create_label(name: str, colour: Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"], options: list[str], multiple_responses: bool, required: bool) -> Any:
+    """Create a label. Create a label with the provided settings.
+    name (required): The Label's name (1-50 chars).
+    colour (required): The Label's colour.
+    options (required): List of options that belong to the Label (each 1-50 chars).
+    multiple_responses (required): Whether the Label can have multiple responses.
+    required (required): Whether the Label is required."""
+    return await _request("POST", "/network/labels", None, _body({"name": name, "colour": colour, "options": options, "multiple_responses": multiple_responses, "required": required}, None, ()))
+
+@tool("network", "PUT")
+async def network_edit_label(id: int, name: str | None = None, colour: Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"] | None = None, multiple_responses: bool | None = None, required: bool | None = None) -> Any:
+    """Update a label. Update a single label identified by ID. (Options cannot be changed through this endpoint.)
+    name: The Label's name (1-50 chars).
+    colour: The Label's colour.
+    multiple_responses: Whether the Label can have multiple responses.
+    required: Whether the Label is required."""
+    return await _request("PUT", f"/network/labels/{id}", None, _body({"name": name, "colour": colour, "multiple_responses": multiple_responses, "required": required}, None, ()))
+
+@tool("network", "DELETE")
+async def network_delete_label(id: int) -> Any:
+    """DESTRUCTIVE. Delete a label. Delete a single label identified by ID. Label responses will be deleted from all organisations. Module settings that reference this label will be affected."""
+    return await _request("DELETE", f"/network/labels/{id}", None)
 
 
 
@@ -1338,20 +1448,22 @@ async def planning_list_library_items(page: int | None = None, per_page: int | N
     return await _request("GET", "/planning/library_items", {"page": page, "per_page": per_page, "q": q, "status": status, "type_ids[]": type_ids})
 
 @tool("planning", "GET")
-async def planning_list_plan_items(plan_ids: list[int], page: int | None = None, per_page: int | None = None) -> Any:
+async def planning_list_plan_items(plan_ids: list[int], page: int | None = None, per_page: int | None = None, order_by: Literal["created_at:asc", "created_at:desc", "id:asc", "id:desc", "modified_at:asc", "modified_at:desc", "name:asc", "name:desc", "order:asc", "order:desc"] | None = None) -> Any:
     """List plan items. Returns a list of plan items, sorted by ID.
-    plan_ids (required): Filter records to those matching values in the provided array. This filter uses the logical OR operator."""
-    return await _request("GET", "/planning/plan_items", {"plan_ids[]": plan_ids, "page": page, "per_page": per_page})
+    plan_ids (required): Filter records to those matching values in the provided array. This filter uses the logical OR operator.
+    order_by: Order records by the specified field and sort direction."""
+    return await _request("GET", "/planning/plan_items", {"plan_ids[]": plan_ids, "page": page, "per_page": per_page, "order_by": order_by})
 
 @tool("planning", "GET")
-async def planning_list_plans(page: int | None = None, per_page: int | None = None, site_ids: list[int] | None = None, q: str | None = None, starts_after: str | None = None, starts_before: str | None = None, status: Literal["draft", "published"] | None = None) -> Any:
+async def planning_list_plans(page: int | None = None, per_page: int | None = None, site_ids: list[int] | None = None, q: str | None = None, starts_after: str | None = None, starts_before: str | None = None, status: Literal["draft", "published"] | None = None, order_by: Literal["created_at:asc", "created_at:desc", "date:asc", "date:desc", "id:asc", "id:desc", "modified_at:asc", "modified_at:desc", "name:asc", "name:desc"] | None = None) -> Any:
     """List plans. Returns a list of plans, sorted by date and time.
     site_ids: Filter records to those matching values in the provided array. This filter uses the logical OR operator.
     q: Filter records with a fuzzy string match against the following properties: name.
     starts_after: Only include records that start after this date.
     starts_before: Only include records that start before this date.
-    status: Filter records by the provided status."""
-    return await _request("GET", "/planning/plans", {"page": page, "per_page": per_page, "site_ids[]": site_ids, "q": q, "starts_after": starts_after, "starts_before": starts_before, "status": status})
+    status: Filter records by the provided status.
+    order_by: Order records by the specified field and sort direction."""
+    return await _request("GET", "/planning/plans", {"page": page, "per_page": per_page, "site_ids[]": site_ids, "q": q, "starts_after": starts_after, "starts_before": starts_before, "status": status, "order_by": order_by})
 
 @tool("planning", "GET")
 async def planning_list_song_arrangements(page: int | None = None, per_page: int | None = None, q: str | None = None, song_ids: list[int] | None = None, song_statuses: list[Literal["active", "archived"]] | None = None) -> Any:
@@ -1395,7 +1507,7 @@ async def planning_create_plan_note(id: int, content: str, pinned: bool | None =
     """Create a plan note. Create a Note against a Plan in the Planning module.
     content (required): The content of the Note.
     pinned: Whether the Note should be pinned.
-    visible_to: """
+    visible_to: Object, one of these shapes: {just_me: must be true} OR {user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to."""
     return await _request("POST", f"/planning/plans/{id}/notes", None, _body({"content": content, "pinned": pinned, "visible_to": visible_to}, None, ()))
 
 
@@ -1445,14 +1557,15 @@ async def rotas_list_roles(page: int | None = None, per_page: int | None = None,
     return await _request("GET", "/rotas/roles", {"page": page, "per_page": per_page, "member_ids[]": member_ids, "ministry_ids[]": ministry_ids})
 
 @tool("rotas", "GET")
-async def rotas_list_unavailability(page: int | None = None, per_page: int | None = None, contact_ids: list[int] | None = None, child_ids: list[int] | None = None, ministry_ids: list[int] | None = None, starts_before: str | None = None, starts_after: str | None = None) -> Any:
+async def rotas_list_unavailability(page: int | None = None, per_page: int | None = None, contact_ids: list[int] | None = None, child_ids: list[int] | None = None, ministry_ids: list[int] | None = None, starts_before: str | None = None, starts_after: str | None = None, order_by: Literal["created_at:asc", "created_at:desc", "date:asc", "date:desc", "id:asc", "id:desc", "modified_at:asc", "modified_at:desc"] | None = None) -> Any:
     """List unavailability. Returns a list of unavailability, sorted by date created.
     contact_ids: Filter records to those matching values in the provided array. This filter uses the logical OR operator.
     child_ids: Filter records to those matching values in the provided array. This filter uses the logical OR operator.
     ministry_ids: Filter records to those matching values in the provided array. This filter uses the logical OR operator.
     starts_before: Only include records that start before this date.
-    starts_after: Only include records that start after this date."""
-    return await _request("GET", "/rotas/unavailability", {"page": page, "per_page": per_page, "contact_ids[]": contact_ids, "child_ids[]": child_ids, "ministry_ids[]": ministry_ids, "starts_before": starts_before, "starts_after": starts_after})
+    starts_after: Only include records that start after this date.
+    order_by: Order records by the specified field and sort direction."""
+    return await _request("GET", "/rotas/unavailability", {"page": page, "per_page": per_page, "contact_ids[]": contact_ids, "child_ids[]": child_ids, "ministry_ids[]": ministry_ids, "starts_before": starts_before, "starts_after": starts_after, "order_by": order_by})
 
 @tool("rotas", "POST")
 async def rotas_create_unavailability(person: dict[str, Any], starts_at: str, ends_at: str, description: str | None = None) -> Any:
@@ -1578,7 +1691,7 @@ async def smallgroups_create_group_note(id: int, content: str, pinned: bool | No
     """Create a group note. Create a Note against a Group in the Small Groups module.
     content (required): The content of the Note.
     pinned: Whether the Note should be pinned.
-    visible_to: """
+    visible_to: Object, one of these shapes: {just_me: must be true} OR {user_group_ids: array of integer}. just_me: The resource should only be visible to the current user. user_group_ids: List of user group IDs the resource is visible to. You are only able to add user group IDs for user groups you have access to."""
     return await _request("POST", f"/smallgroups/groups/{id}/notes", None, _body({"content": content, "pinned": pinned, "visible_to": visible_to}, None, ()))
 
 @tool("smallgroups", "POST")
@@ -1588,7 +1701,7 @@ async def smallgroups_create_member(group_id: int, person: dict[str, Any], joine
     person (required): The Members's person details. Keys: type, id.
     joined_date (required): Date the Member joined the group.
     status (required): The status of the Member.
-    privacy (required): The Member's privacy settings. Keys: use_defaults, telephone_visible, mobile_visible, email_visible.
+    privacy (required): The Member's privacy settings. Object keys: use_defaults (boolean, required): Use the Member's default privacy settings. If this is false `telephone_visible`, `mobile_visible` and `email_visible` must be set; telephone_visible (boolean): Telephone is visible; mobile_visible (boolean): Mobile is visible; email_visible (boolean): Email is visible.
     role_ids: List of role_ids for any roles being assigned to the Member.
     send_email_confirmation: Send the sign-up confirmation email to the Member you are adding and a sign-up notification to any existing members with the appropriate role.
     override_capacity: Override the capacity of the group if adding the Member will take the group over capacity."""
@@ -1617,7 +1730,7 @@ async def smallgroups_edit_member(id: int, role_ids: list[int], joined_date: str
     role_ids (required): List of role_ids for any Roles being assigned to the Member.
     joined_date (required): Date the Member joined the group.
     status (required): The current status of the Member.
-    privacy (required): The Member's privacy settings. Keys: use_defaults, telephone_visible, mobile_visible, email_visible."""
+    privacy (required): The Member's privacy settings. Object keys: use_defaults (boolean, required): Use the Member's default privacy settings. If this is false `telephone_visible`, `mobile_visible` and `email_visible` must be set; telephone_visible (boolean): Telephone is visible; mobile_visible (boolean): Mobile is visible; email_visible (boolean): Email is visible."""
     return await _request("PUT", f"/smallgroups/members/{id}", None, _body({"role_ids": role_ids, "joined_date": joined_date, "status": status, "privacy": privacy}, None, ()))
 
 @tool("smallgroups", "PUT")
@@ -1640,6 +1753,30 @@ async def smallgroups_delete_cluster(id: int) -> Any:
 async def smallgroups_delete_member(id: int) -> Any:
     """DESTRUCTIVE. Delete a member. Delete a single member identified by ID."""
     return await _request("DELETE", f"/smallgroups/members/{id}", None)
+
+@tool("smallgroups", "POST")
+async def smallgroups_create_label(name: str, colour: Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"], options: list[str], multiple_responses: bool, required: bool) -> Any:
+    """Create a label. Create a label with the provided settings.
+    name (required): The Label's name (1-50 chars).
+    colour (required): The Label's colour.
+    options (required): List of options that belong to the Label (each 1-50 chars).
+    multiple_responses (required): Whether the Label can have multiple responses.
+    required (required): Whether the Label is required."""
+    return await _request("POST", "/smallgroups/labels", None, _body({"name": name, "colour": colour, "options": options, "multiple_responses": multiple_responses, "required": required}, None, ()))
+
+@tool("smallgroups", "PUT")
+async def smallgroups_edit_label(id: int, name: str | None = None, colour: Literal["blue", "red", "orange", "green", "purple", "pink", "brown", "grey"] | None = None, multiple_responses: bool | None = None, required: bool | None = None) -> Any:
+    """Update a label. Update a single label identified by ID. (Options cannot be changed through this endpoint.)
+    name: The Label's name (1-50 chars).
+    colour: The Label's colour.
+    multiple_responses: Whether the Label can have multiple responses.
+    required: Whether the Label is required."""
+    return await _request("PUT", f"/smallgroups/labels/{id}", None, _body({"name": name, "colour": colour, "multiple_responses": multiple_responses, "required": required}, None, ()))
+
+@tool("smallgroups", "DELETE")
+async def smallgroups_delete_label(id: int) -> Any:
+    """DESTRUCTIVE. Delete a label. Delete a single label identified by ID. Label responses will be deleted from all groups. Module settings that reference this label will be affected."""
+    return await _request("DELETE", f"/smallgroups/labels/{id}", None)
 
 @tool("smallgroups", "DELETE")
 async def smallgroups_delete_role(id: int) -> Any:
